@@ -1,17 +1,36 @@
 import { randomUUID } from "node:crypto";
 import http from "node:http";
 import express from "express";
-import type { AuditEntry, ServiceName, Snapshot } from "@nightshift/shared";
+import type { Attempt, AuditEntry, Incident, ServiceName, Snapshot } from "@nightshift/shared";
 import { registerRoutes } from "./api/routes.js";
 import { startCollector, waitForServices } from "./collect/collector.js";
 import { config } from "./config.js";
 import { createDetector } from "./detect/detector.js";
+import { candidatesFor, classifyFailure, type FixCandidate } from "./fix/catalog.js";
+import {
+  captureState,
+  readStatus,
+  readTotals,
+  restoreState,
+  runSteps,
+  serviceUrl,
+  waitForUrl,
+} from "./fix/steps.js";
 import { IncidentManager } from "./incidents/manager.js";
 import { createGateway } from "./realtime/gateway.js";
 import { ServiceRegistry } from "./registry.js";
+import { ApprovalGate } from "./remediate/approvals.js";
+import { ActionCap } from "./remediate/cap.js";
+import { Remediator, type RemediationPlan } from "./remediate/remediator.js";
+import { watchService } from "./remediate/watch.js";
 import { Supervisor } from "./supervisor/supervisor.js";
 import { connectStore } from "./store/db.js";
 import * as repo from "./store/repository.js";
+import { createVerifier, PortPool } from "./verify/verifier.js";
+
+type AuditInput = Omit<AuditEntry, "id" | "at">;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main(): Promise<void> {
   const store = await connectStore();
@@ -25,22 +44,112 @@ async function main(): Promise<void> {
   const latest = new Map<ServiceName, Snapshot>();
   const detector = createDetector(config.detector);
 
-  const audit = async (entry: Omit<AuditEntry, "id" | "at">): Promise<void> => {
+  const audit = async (entry: AuditInput): Promise<void> => {
     const full: AuditEntry = { id: randomUUID(), at: new Date().toISOString(), ...entry };
     await repo.insertAudit(store.db, full);
     gateway.publish("audit", full);
   };
 
-  const manager = new IncidentManager({
-    saveIncident: (incident) => repo.saveIncident(store.db, incident),
-    audit,
-    publish: gateway.publish,
-    dependencies: () => registry.dependencyMap(),
+  const persist = async (incident: Incident): Promise<void> => {
+    await repo.saveIncident(store.db, incident);
+    gateway.publish("incident", incident);
+  };
+
+  const auditIncident = (action: string, incident: Incident, details: Record<string, unknown>): Promise<void> =>
+    audit({
+      actor: "healer",
+      action,
+      trigger: String(details.note ?? action),
+      incidentId: incident.id,
+      details,
+    });
+
+  const approvals = new ApprovalGate(config.approvalTimeoutMs);
+  const cap = new ActionCap(config.actionCap.max, config.actionCap.windowMs);
+  const ports = new PortPool(config.clonePorts.from, config.clonePorts.to);
+  const supervisor = new Supervisor(config.healerUrl);
+  process.on("exit", () => supervisor.stop());
+
+  const verify = createVerifier({
+    captures: (service, sinceIso) => repo.listCapturesSince(store.db, service, sinceIso, config.replay.limit),
+    startClone: async (service, port) => supervisor.spawnClone(service, port),
+    waitReady: waitForUrl,
+    allocatePort: () => ports.allocate(),
+    releasePort: (port) => ports.release(port),
+    readStatus,
+    now: () => new Date(),
+    rules: config.verdict,
+    replayWindowSeconds: config.replay.windowSeconds,
+    replayConcurrency: config.replay.concurrency,
+    cloneReadyTimeoutMs: config.cloneReadyTimeoutMs,
   });
 
-  const supervisor = new Supervisor();
-  process.on("exit", () => supervisor.stop());
-  supervisor.start(registry.list(), config.healerUrl);
+  const planFor = (incident: Incident): RemediationPlan => {
+    const root = incident.rootCause as ServiceName;
+    const rootAnomalies = incident.anomalies.filter((anomaly) => anomaly.service === root);
+    const configMode = latest.get(root)?.configMode ?? "unknown";
+    const failure = classifyFailure(rootAnomalies, configMode);
+    const candidates = failure ? candidatesFor(failure, registry.get(root).allowedFixTypes) : [];
+    return { failure, candidates };
+  };
+
+  const applyToProduction = async (incident: Incident, candidate: FixCandidate): Promise<void> => {
+    const record = registry.get(incident.rootCause as ServiceName);
+    if (!candidate.productionAllowed) {
+      throw new Error(`${candidate.id} is not allowed in production`);
+    }
+    if (candidate.startsFresh) {
+      await supervisor.restart(record);
+      if (!(await waitForUrl(serviceUrl(record.port), config.productionReadyTimeoutMs))) {
+        throw new Error(`${record.name} did not come back after restart`);
+      }
+    } else {
+      await runSteps(serviceUrl(record.port), candidate.steps);
+    }
+  };
+
+  const remediator = new Remediator({
+    plan: planFor,
+    verify: (incident, candidate) => verify(registry.get(incident.rootCause as ServiceName), incident.id, candidate),
+    saveAttempt: async (attempt: Attempt) => {
+      await repo.saveAttempt(store.db, attempt);
+      gateway.publish("attempt", attempt);
+    },
+    captureState: (service) => captureState(serviceUrl(registry.get(service).port)),
+    restoreState: (service, state) => restoreState(serviceUrl(registry.get(service).port), state),
+    applyToProduction,
+    watch: (service, preFixErrorRate) =>
+      watchService({
+        readTotals: () => readTotals(serviceUrl(registry.get(service).port)),
+        preFixErrorRate,
+        durationMs: config.watch.durationMs,
+        intervalMs: config.watch.intervalMs,
+        minRequests: config.watch.minRequests,
+        minErrorRate: config.watch.minErrorRate,
+        consecutive: config.watch.consecutive,
+        sleep,
+      }),
+    approvals,
+    cap,
+    persist,
+    audit: auditIncident,
+    sleep,
+    now: () => new Date(),
+    capacityPollMs: config.capacityPollMs,
+    capacityWaitMs: config.capacityWaitMs,
+  });
+
+  const manager = new IncidentManager({
+    persist,
+    audit,
+    dependencies: () => registry.dependencyMap(),
+    startRemediation: (incident) => {
+      void remediator.run(incident);
+    },
+    isRemediating: () => remediator.isBusy(),
+  });
+
+  supervisor.start(registry.list());
 
   registerRoutes(app, {
     db: store.db,
@@ -48,6 +157,8 @@ async function main(): Promise<void> {
     latestSnapshots: () => [...latest.values()],
     activeIncident: () => manager.current(),
     audit,
+    approvals,
+    cap,
   });
 
   await new Promise<void>((resolve) => server.listen(config.healerPort, resolve));

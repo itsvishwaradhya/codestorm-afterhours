@@ -20,3 +20,7 @@ export const chaosSchema = z.object({
   service: z.enum(SERVICE_NAMES),
   fault: z.enum(FAULT_TYPES).nullable(),
 });
+
+export const approvalSchema = z.object({
+  decision: z.enum(["approve", "reject"]),
+});

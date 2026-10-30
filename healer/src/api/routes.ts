@@ -10,9 +10,11 @@ import {
   type Snapshot,
 } from "@nightshift/shared";
 import { injectFault } from "../chaos/injector.js";
+import type { ApprovalGate } from "../remediate/approvals.js";
+import type { ActionCap } from "../remediate/cap.js";
 import type { ServiceRegistry } from "../registry.js";
 import * as repo from "../store/repository.js";
-import { captureSchema, chaosSchema, serviceUpdateSchema } from "./schemas.js";
+import { approvalSchema, captureSchema, chaosSchema, serviceUpdateSchema } from "./schemas.js";
 
 type AuditInput = Omit<AuditEntry, "id" | "at">;
 
@@ -22,6 +24,8 @@ export interface ApiContext {
   latestSnapshots: () => Snapshot[];
   activeIncident: () => Incident | null;
   audit: (entry: AuditInput) => Promise<void>;
+  approvals: ApprovalGate;
+  cap: ActionCap;
 }
 
 type Handler = (req: Request, res: Response) => Promise<void>;
@@ -42,6 +46,8 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
       services: ctx.registry.list(),
       snapshots: ctx.latestSnapshots(),
       activeIncident: ctx.activeIncident(),
+      pendingApprovals: ctx.approvals.pending(),
+      cap: ctx.cap.status(),
     });
   });
 
@@ -105,12 +111,30 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
   app.get(
     "/api/incidents/:id",
     wrap(async (req, res) => {
-      const incident = await repo.getIncident(ctx.db, String(req.params.id));
+      const id = String(req.params.id);
+      const incident = await repo.getIncident(ctx.db, id);
       if (!incident) {
         res.status(404).json({ error: "incident not found" });
         return;
       }
-      res.json(incident);
+      res.json({ ...incident, attempts: await repo.listAttempts(ctx.db, id) });
+    }),
+  );
+
+  app.post(
+    "/api/approvals/:id",
+    wrap(async (req, res) => {
+      const parsed = approvalSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues });
+        return;
+      }
+      const decided = ctx.approvals.decide(String(req.params.id), parsed.data.decision);
+      if (!decided) {
+        res.status(404).json({ error: "no pending approval with that id" });
+        return;
+      }
+      res.status(202).json({ decision: parsed.data.decision });
     }),
   );
 

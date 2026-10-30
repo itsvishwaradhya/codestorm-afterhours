@@ -1,5 +1,6 @@
 import type { Db } from "mongodb";
 import type {
+  Attempt,
   AuditEntry,
   Incident,
   ServiceName,
@@ -58,6 +59,21 @@ export async function listCaptures(db: Db, service: ServiceName, limit: number):
   return docs as unknown as CaptureRecord[];
 }
 
+export async function listCapturesSince(
+  db: Db,
+  service: ServiceName,
+  sinceIso: string,
+  limit: number,
+): Promise<CaptureRecord[]> {
+  const docs = await db
+    .collection("capturedRequests")
+    .find({ service, at: { $gte: new Date(sinceIso) } }, hideMongoId)
+    .sort({ at: 1 })
+    .limit(limit)
+    .toArray();
+  return docs as unknown as CaptureRecord[];
+}
+
 export async function insertAudit(db: Db, entry: AuditEntry): Promise<void> {
   await db.collection("auditLog").insertOne(entry);
 }
@@ -79,4 +95,17 @@ export async function listIncidents(db: Db, limit: number): Promise<Incident[]> 
 export async function getIncident(db: Db, id: string): Promise<Incident | null> {
   const doc = await db.collection("incidents").findOne({ id }, hideMongoId);
   return (doc as unknown as Incident | null) ?? null;
+}
+
+export async function saveAttempt(db: Db, attempt: Attempt): Promise<void> {
+  await db.collection("attempts").updateOne({ id: attempt.id }, { $set: attempt }, { upsert: true });
+}
+
+export async function listAttempts(db: Db, incidentId: string): Promise<Attempt[]> {
+  const docs = await db
+    .collection("attempts")
+    .find({ incidentId }, hideMongoId)
+    .sort({ startedAt: 1 })
+    .toArray();
+  return docs as unknown as Attempt[];
 }

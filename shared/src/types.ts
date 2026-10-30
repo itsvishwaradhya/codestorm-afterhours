@@ -33,6 +33,7 @@ export interface ServiceStatus {
   config: { mode: "ok" | "corrupt" };
   healthy: boolean;
   metrics: ServiceMetrics;
+  totals: { requests: number; errors: number };
 }
 
 export interface ServiceRecord {
@@ -53,6 +54,8 @@ export interface Anomaly {
   since: string;
 }
 
+export type FailureType = "crash" | "slow" | "memory_leak" | "bad_config";
+
 export interface Snapshot {
   service: ServiceName;
   at: string;
@@ -66,7 +69,16 @@ export interface Snapshot {
   configMode: "ok" | "corrupt" | "unknown";
 }
 
-export type IncidentState = "detected" | "diagnosed" | "closed";
+export type IncidentState =
+  | "detected"
+  | "diagnosed"
+  | "verifying"
+  | "awaiting_approval"
+  | "rate_limited"
+  | "promoting"
+  | "watching"
+  | "resolved"
+  | "escalated";
 
 export interface RankedCause {
   service: ServiceName;
@@ -81,10 +93,47 @@ export interface Incident {
   symptoms: ServiceName[];
   causes: RankedCause[];
   anomalies: Anomaly[];
+  failure: FailureType | null;
+  pendingApprovalId: string | null;
   stateHistory: { state: IncidentState; at: string }[];
   openedAt: string;
   closedAt: string | null;
   outcome: string | null;
+}
+
+export type Risk = "low" | "medium" | "high";
+
+export interface WindowMetrics {
+  requests: number;
+  errorRate: number;
+  p95LatencyMs: number;
+}
+
+export type AttemptStatus =
+  | "rejected"
+  | "verified"
+  | "awaiting_approval"
+  | "approved"
+  | "declined"
+  | "timed_out"
+  | "applied"
+  | "kept"
+  | "rolled_back";
+
+export interface Attempt {
+  id: string;
+  incidentId: string;
+  candidate: string;
+  label: string;
+  risk: Risk;
+  verdict: "promote" | "reject" | "insufficient evidence";
+  reasons: string[];
+  baseline: WindowMetrics;
+  candidateMetrics: WindowMetrics;
+  sampleSize: number;
+  status: AttemptStatus;
+  startedAt: string;
+  endedAt: string | null;
 }
 
 export interface AuditEntry {

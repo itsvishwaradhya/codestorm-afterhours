@@ -18,6 +18,7 @@ if (!name || !(SERVICE_NAMES as readonly string[]).includes(name)) {
 const service = name as ServiceName;
 const port = Number(process.env.PORT ?? SERVICE_PORTS[service]);
 const HEALER_URL = process.env.HEALER_URL ?? "http://localhost:4000";
+const IS_SHADOW = process.env.SHADOW === "1";
 
 const SLOW_MS = 2000;
 const DOWNSTREAM_TIMEOUT_MS = 3000;
@@ -39,6 +40,8 @@ const leaked: Buffer[] = [];
 const startedAt = new Date().toISOString();
 let activeFault: FaultType | null = null;
 let configMode: "ok" | "corrupt" = "ok";
+let totalRequests = 0;
+let totalErrors = 0;
 
 function memoryMb(): number {
   return process.memoryUsage().rss / MB;
@@ -82,6 +85,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function captureRequest(req: express.Request): void {
+  if (IS_SHADOW) return;
   const record = {
     service,
     at: new Date().toISOString(),
@@ -101,7 +105,10 @@ function captureRequest(req: express.Request): void {
 async function callDownstream(target: ServiceName, path: string, payload: unknown): Promise<unknown> {
   const response = await fetch(`http://localhost:${SERVICE_PORTS[target]}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(IS_SHADOW ? { "x-nightshift-shadow": "1" } : {}),
+    },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(DOWNSTREAM_TIMEOUT_MS),
   });
@@ -141,7 +148,10 @@ async function handleBusinessRequest(
     }
   }
 
-  recordSample(Date.now() - started, outcome.status < 400);
+  const ok = outcome.status < 400;
+  totalRequests += 1;
+  if (!ok) totalErrors += 1;
+  recordSample(Date.now() - started, ok);
   res.status(outcome.status).json(outcome.body);
 }
 
@@ -162,6 +172,7 @@ app.get("/metrics", (_req, res) => {
     config: { mode: configMode },
     healthy: isHealthy(),
     metrics: currentMetrics(),
+    totals: { requests: totalRequests, errors: totalErrors },
   };
   res.json(status);
 });
@@ -237,5 +248,5 @@ if (service === "inventory") {
 }
 
 app.listen(port, () => {
-  console.log(`[${service}] listening on http://localhost:${port}`);
+  console.log(`[${service}${IS_SHADOW ? " shadow" : ""}] listening on http://localhost:${port}`);
 });
