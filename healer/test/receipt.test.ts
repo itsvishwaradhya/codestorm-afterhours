@@ -123,6 +123,38 @@ describe("template receipt", () => {
     expect(buildFacts(incident(), [attempt]).after).toBeNull();
   });
 
+  it("says how fast it healed when a kept fix resolved the incident", () => {
+    const healedIncident: Incident = {
+      ...incident(),
+      stateHistory: [
+        { state: "detected", at: "2026-10-30T06:35:11.000Z" },
+        { state: "verifying", at: "2026-10-30T06:35:13.000Z" },
+        { state: "watching", at: "2026-10-30T06:35:20.000Z" },
+        { state: "resolved", at: "2026-10-30T06:36:20.000Z" },
+      ],
+      anomalies: [{ service: "payments", kind: "unhealthy", value: 0, threshold: 1, since: "2026-10-30T06:35:09.000Z" }],
+    };
+    const text = draftReceipt(buildFacts(healedIncident, [keptAttempt()]));
+    expect(text).toContain("Healed in 11 s from the first bad sample: detected in 2 s");
+    expect(text).toContain("No human was paged.");
+    expect(validateRewording(text, "Healed in 11 s; detected in 2 s, no human was paged.").ok).toBe(true);
+  });
+
+  it("does not claim a heal for an escalated incident", () => {
+    const failed: Incident = {
+      ...incident(),
+      state: "escalated",
+      stateHistory: [
+        { state: "detected", at: "2026-10-30T06:35:11.000Z" },
+        { state: "watching", at: "2026-10-30T06:35:20.000Z" },
+        { state: "escalated", at: "2026-10-30T06:36:20.000Z" },
+      ],
+    };
+    const text = draftReceipt(buildFacts(failed, [{ ...keptAttempt(), status: "rolled_back" }]));
+    expect(text).not.toContain("Healed in");
+    expect(text).not.toContain("No human was paged");
+  });
+
   it("explains a gray failure and a recurrence", () => {
     const gray: Incident = {
       ...incident(),
@@ -135,6 +167,24 @@ describe("template receipt", () => {
     expect(text).toContain("came back after an earlier fix (incident abcdef12)");
   });
 });
+
+function keptAttempt(): Attempt {
+  return {
+    id: "attempt-1",
+    incidentId: "incident-1",
+    candidate: "revert_config",
+    label: "Revert config to last known good",
+    risk: "low",
+    verdict: "promote",
+    reasons: [],
+    baseline: { requests: 80, errorRate: 0.06, p95LatencyMs: 1 },
+    candidateMetrics: { requests: 86, errorRate: 0, p95LatencyMs: 12 },
+    sampleSize: 86,
+    status: "kept",
+    startedAt: "2026-10-30T06:35:13.000Z",
+    endedAt: "2026-10-30T06:35:19.000Z",
+  };
+}
 
 function incident(): Incident {
   return {

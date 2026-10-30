@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Attempt, Incident } from "@nightshift/shared";
+import { healTiming } from "../report/timing.js";
 
 const metricsSchema = z.object({
   errorRate: z.number(),
@@ -24,6 +25,9 @@ export const receiptFactsSchema = z.object({
   openedAt: z.string(),
   closedAt: z.string().nullable(),
   durationSeconds: z.number().nullable(),
+  detectSeconds: z.number(),
+  fixLiveSeconds: z.number().nullable(),
+  humanWaitSeconds: z.number(),
   outcome: z.string().nullable(),
   candidates: z.array(
     z.object({
@@ -56,6 +60,7 @@ export function buildFacts(incident: Incident, attempts: Attempt[]): ReceiptFact
   const durationSeconds = incident.closedAt
     ? Math.round((Date.parse(incident.closedAt) - Date.parse(incident.openedAt)) / 1000)
     : null;
+  const timing = healTiming(incident);
 
   return receiptFactsSchema.parse({
     incidentId: incident.id,
@@ -73,6 +78,9 @@ export function buildFacts(incident: Incident, attempts: Attempt[]): ReceiptFact
     openedAt: incident.openedAt,
     closedAt: incident.closedAt,
     durationSeconds,
+    detectSeconds: timing.detectSeconds,
+    fixLiveSeconds: timing.fixLiveSeconds,
+    humanWaitSeconds: timing.humanWaitSeconds,
     outcome: incident.outcome,
     candidates: attempts.map((attempt) => ({
       label: attempt.label,

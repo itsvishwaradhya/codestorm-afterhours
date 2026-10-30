@@ -84,6 +84,11 @@ export async function listAudit(db: Db, limit: number): Promise<AuditEntry[]> {
   return docs as unknown as AuditEntry[];
 }
 
+export async function listAuditByAction(db: Db, action: string, limit: number): Promise<AuditEntry[]> {
+  const docs = await db.collection("auditLog").find({ action }, hideMongoId).sort({ at: -1 }).limit(limit).toArray();
+  return docs as unknown as AuditEntry[];
+}
+
 export async function saveIncident(db: Db, incident: Incident): Promise<void> {
   await db.collection("incidents").updateOne({ id: incident.id }, { $set: incident }, { upsert: true });
 }
@@ -145,6 +150,11 @@ export async function listActedAttempts(db: Db, limit: number): Promise<Attempt[
     .sort({ startedAt: -1 })
     .limit(limit)
     .toArray();
+  return docs as unknown as Attempt[];
+}
+
+export async function listRecentAttempts(db: Db, limit: number): Promise<Attempt[]> {
+  const docs = await db.collection("attempts").find({}, hideMongoId).sort({ startedAt: -1 }).limit(limit).toArray();
   return docs as unknown as Attempt[];
 }
 

@@ -113,13 +113,14 @@ to run while a remediation is in progress.
 | `npm run dashboard` | Dashboard only, expects a healer on port 4000 |
 | `npm run traffic` | Synthetic checkout traffic |
 | `npm run reset` | Clear demo state and restart services healthy |
-| `npm run scenario -- crash` | Verify one end-to-end scenario: `crash`, `slow`, `memory_leak`, `bad_config`, `decoy`, `approval` |
-| `npm test` | 61 Vitest unit tests |
+| `npm run scenario -- crash` | Verify one end-to-end scenario: `crash`, `slow`, `memory_leak`, `bad_config`, `decoy`, `approval`, `gray`, `gray_slow`, `flap` |
+| `npm test` | 102 Vitest unit tests |
 | `npm run typecheck` | TypeScript check across all workspaces |
 
 The scenario runner expects a live healer with traffic running. It waits for quiet, injects the
 fault, follows the incident to a terminal state, checks the outcome and the receipt, and exits
-non-zero on failure. The `approval` scenario restricts the allowed fix to a medium-risk reset,
+non-zero on failure. Each run prints its time to heal, measured from the first bad sample. The `flap` scenario
+re-injects a gray fault after every fix and expects the circuit breaker to stop a restart storm. The `approval` scenario restricts the allowed fix to a medium-risk reset,
 waits at the approval gate, approves it through the API, and expects the heal to complete. It is
 the rehearsal check, not part of the UI.
 
@@ -155,6 +156,7 @@ No key is required for the core demo.
 | `GET /api/incidents` / `GET /api/incidents/:id` | Incident list and detail with attempts |
 | `GET /api/receipts/:incidentId` | Heal Receipt, 404 until the incident closes |
 | `GET /api/audit` | Audit trail |
+| `GET /api/scorecard` | Time to heal and what a blind auto-restart policy would have done, counted from the record |
 | `GET /api/captures?service=payments` | Masked captured requests used for replay |
 | `POST /api/approvals/:attemptId` | `{ "decision": "approve" \| "reject" }` |
 | `POST /api/chaos` | `{ "service": "payments", "fault": "crash" }`; `null` clears the fault |

@@ -14,6 +14,8 @@ import type { ApprovalGate } from "../remediate/approvals.js";
 import type { ActionCap } from "../remediate/cap.js";
 import type { RemediationGuard } from "../remediate/guard.js";
 import type { ServiceRegistry } from "../registry.js";
+import { guardrailSavings } from "../report/guardrails.js";
+import { healTiming } from "../report/timing.js";
 import * as repo from "../store/repository.js";
 import { approvalSchema, captureSchema, chaosSchema, guardResetSchema, serviceUpdateSchema } from "./schemas.js";
 
@@ -84,6 +86,18 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
         if (attempt.impact) counts[attempt.impact] += 1;
       }
       res.json({ counts, recent: attempts.slice(0, 20) });
+    }),
+  );
+
+  app.get(
+    "/api/scorecard",
+    wrap(async (_req, res) => {
+      const [incidents, attempts, suppressed] = await Promise.all([
+        repo.listIncidents(ctx.db, 200),
+        repo.listRecentAttempts(ctx.db, 500),
+        repo.listAuditByAction(ctx.db, "action.suppressed", 500),
+      ]);
+      res.json(guardrailSavings({ incidents, attempts, suppressed }));
     }),
   );
 
@@ -165,7 +179,7 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
         res.status(404).json({ error: "incident not found" });
         return;
       }
-      res.json({ ...incident, attempts: await repo.listAttempts(ctx.db, id) });
+      res.json({ ...incident, attempts: await repo.listAttempts(ctx.db, id), timing: healTiming(incident) });
     }),
   );
 
