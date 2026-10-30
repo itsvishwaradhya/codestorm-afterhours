@@ -1,0 +1,23 @@
+{
+  "name": "nightshift",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "shared",
+    "services"
+  ],
+  "scripts": {
+    "services": "tsx services/src/start-all.ts",
+    "traffic": "tsx services/src/traffic.ts",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
