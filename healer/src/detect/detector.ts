@@ -38,6 +38,10 @@ export function createDetector(thresholds: DetectorThresholds) {
   const streaks = new Map<string, { count: number; since: string }>();
 
   return {
+    reset(): void {
+      streaks.clear();
+    },
+
     observe(snapshot: Snapshot): Anomaly[] {
       const breaches = breachesOf(snapshot, thresholds);
       const breachedKinds = new Set(breaches.map((breach) => breach.kind));

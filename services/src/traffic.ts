@@ -1,3 +1,4 @@
+import "./env.js";
 import { SERVICE_PORTS } from "@nightshift/shared";
 
 const RPS = Number(process.env.TRAFFIC_RPS ?? 2);

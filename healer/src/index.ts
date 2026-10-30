@@ -1,9 +1,10 @@
+import "./env.js";
 import { randomUUID } from "node:crypto";
 import http from "node:http";
 import express from "express";
 import type { Attempt, AuditEntry, Incident, ServiceName, Snapshot } from "@nightshift/shared";
 import { registerRoutes } from "./api/routes.js";
-import { startCollector, waitForServices } from "./collect/collector.js";
+import { startCollector, waitForServices, type Collector } from "./collect/collector.js";
 import { config } from "./config.js";
 import { createDetector } from "./detect/detector.js";
 import { candidatesFor, classifyFailure, type FixCandidate } from "./fix/catalog.js";
@@ -21,11 +22,14 @@ import { createGateway } from "./realtime/gateway.js";
 import { ServiceRegistry } from "./registry.js";
 import { ApprovalGate } from "./remediate/approvals.js";
 import { ActionCap } from "./remediate/cap.js";
-import { Remediator, type RemediationPlan } from "./remediate/remediator.js";
+import { isTerminal, Remediator, type RemediationPlan } from "./remediate/remediator.js";
+import { createProviders } from "./receipt/providers.js";
+import { ReceiptWriter } from "./receipt/writer.js";
 import { watchService } from "./remediate/watch.js";
 import { Supervisor } from "./supervisor/supervisor.js";
 import { connectStore } from "./store/db.js";
 import * as repo from "./store/repository.js";
+import { fixtureFor } from "./verify/fixture.js";
 import { createVerifier, PortPool } from "./verify/verifier.js";
 
 type AuditInput = Omit<AuditEntry, "id" | "at">;
@@ -50,9 +54,25 @@ async function main(): Promise<void> {
     gateway.publish("audit", full);
   };
 
+  const receiptWriter = new ReceiptWriter({
+    loadAttempts: (incidentId) => repo.listAttempts(store.db, incidentId),
+    saveReceipt: async (receipt) => {
+      await repo.saveReceipt(store.db, receipt);
+      gateway.publish("receipt", receipt);
+    },
+    providers: createProviders(process.env),
+    chain: { ...config.llm, log: (message) => console.log(message) },
+    now: () => new Date(),
+  });
+  const receipted = new Set<string>();
+
   const persist = async (incident: Incident): Promise<void> => {
     await repo.saveIncident(store.db, incident);
     gateway.publish("incident", incident);
+    if (isTerminal(incident.state) && !receipted.has(incident.id)) {
+      receipted.add(incident.id);
+      receiptWriter.write(incident).catch((error) => console.error("[receipt] failed", error));
+    }
   };
 
   const auditIncident = (action: string, incident: Incident, details: Record<string, unknown>): Promise<void> =>
@@ -71,7 +91,23 @@ async function main(): Promise<void> {
   process.on("exit", () => supervisor.stop());
 
   const verify = createVerifier({
-    captures: (service, sinceIso) => repo.listCapturesSince(store.db, service, sinceIso, config.replay.limit),
+    captures: async (service, sinceIso) => {
+      const records = await repo.listCapturesSince(store.db, service, sinceIso, config.replay.limit);
+      if (records.length === 0) {
+        console.log(`[verify] no captured requests for ${service} in the window, using the recorded fixture`);
+        return fixtureFor(service);
+      }
+      if (records.length < config.verdict.minSampleSize) {
+        console.log(
+          `[verify] only ${records.length} captured requests for ${service}, repeating them to reach ${config.verdict.minSampleSize}`,
+        );
+        return Array.from(
+          { length: config.verdict.minSampleSize },
+          (_, index) => records[index % records.length],
+        );
+      }
+      return records;
+    },
     startClone: async (service, port) => supervisor.spawnClone(service, port),
     waitReady: waitForUrl,
     allocatePort: () => ports.allocate(),
@@ -151,6 +187,40 @@ async function main(): Promise<void> {
 
   supervisor.start(registry.list());
 
+  let resetting = false;
+  let collector: Collector | null = null;
+
+  const resetDemo = async (): Promise<boolean> => {
+    if (remediator.isBusy() || resetting) return false;
+    resetting = true;
+    const paused = collector;
+    await paused?.pause();
+    try {
+      detector.reset();
+      manager.reset();
+      cap.reset();
+      latest.clear();
+      receipted.clear();
+      await registry.reset();
+      await Promise.all(registry.list().map((service) => supervisor.restart(service)));
+      await waitForServices(registry.list(), config.readyTimeoutMs);
+      await repo.clearDemoData(store.db);
+      detector.reset();
+      manager.reset();
+      await audit({
+        actor: "operator",
+        action: "demo.reset",
+        trigger: "reset incidents, receipts, attempts and captures",
+        incidentId: null,
+        details: {},
+      });
+      return true;
+    } finally {
+      paused?.resume();
+      resetting = false;
+    }
+  };
+
   registerRoutes(app, {
     db: store.db,
     registry,
@@ -159,6 +229,7 @@ async function main(): Promise<void> {
     audit,
     approvals,
     cap,
+    reset: resetDemo,
   });
 
   await new Promise<void>((resolve) => server.listen(config.healerPort, resolve));
@@ -167,10 +238,11 @@ async function main(): Promise<void> {
   await waitForServices(registry.list(), config.readyTimeoutMs);
   console.log("[healer] demo services are ready, collecting signals");
 
-  const collector = startCollector({
+  collector = startCollector({
     intervalMs: config.collectIntervalMs,
     getServices: () => registry.list(),
     onSnapshots: async (snapshots) => {
+      if (resetting) return;
       for (const snapshot of snapshots) {
         latest.set(snapshot.service, snapshot);
         await repo.insertSnapshot(store.db, snapshot);
@@ -182,7 +254,7 @@ async function main(): Promise<void> {
   });
 
   const shutdown = async (): Promise<void> => {
-    collector.stop();
+    collector?.stop();
     supervisor.stop();
     gateway.close();
     server.close();

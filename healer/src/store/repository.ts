@@ -3,6 +3,7 @@ import type {
   Attempt,
   AuditEntry,
   Incident,
+  Receipt,
   ServiceName,
   ServiceRecord,
   Snapshot,
@@ -95,6 +96,26 @@ export async function listIncidents(db: Db, limit: number): Promise<Incident[]> 
 export async function getIncident(db: Db, id: string): Promise<Incident | null> {
   const doc = await db.collection("incidents").findOne({ id }, hideMongoId);
   return (doc as unknown as Incident | null) ?? null;
+}
+
+export async function saveReceipt(db: Db, receipt: Receipt): Promise<void> {
+  await db.collection("receipts").updateOne({ incidentId: receipt.incidentId }, { $set: receipt }, { upsert: true });
+}
+
+export async function getReceipt(db: Db, incidentId: string): Promise<Receipt | null> {
+  const doc = await db.collection("receipts").findOne({ incidentId }, hideMongoId);
+  return (doc as unknown as Receipt | null) ?? null;
+}
+
+export async function clearDemoData(db: Db): Promise<void> {
+  await Promise.all([
+    db.collection("incidents").deleteMany({}),
+    db.collection("attempts").deleteMany({}),
+    db.collection("receipts").deleteMany({}),
+    db.collection("capturedRequests").deleteMany({}),
+    db.collection("snapshots").deleteMany({}),
+    db.collection("auditLog").deleteMany({}),
+  ]);
 }
 
 export async function saveAttempt(db: Db, attempt: Attempt): Promise<void> {

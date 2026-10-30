@@ -61,10 +61,17 @@ export interface CollectorOptions {
   onSnapshots: (snapshots: Snapshot[]) => Promise<void>;
 }
 
-export function startCollector(options: CollectorOptions): { stop: () => void } {
+export interface Collector {
+  stop: () => void;
+  pause: () => Promise<void>;
+  resume: () => void;
+}
+
+export function startCollector(options: CollectorOptions): Collector {
   let running = false;
+  let paused = false;
   const timer = setInterval(() => {
-    if (running) return;
+    if (paused || running) return;
     running = true;
     const at = new Date();
     Promise.all(options.getServices().map((service) => probeService(service, at)))
@@ -74,5 +81,16 @@ export function startCollector(options: CollectorOptions): { stop: () => void } 
         running = false;
       });
   }, options.intervalMs);
-  return { stop: () => clearInterval(timer) };
+  return {
+    stop: () => clearInterval(timer),
+    pause: async () => {
+      paused = true;
+      while (running) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    },
+    resume: () => {
+      paused = false;
+    },
+  };
 }

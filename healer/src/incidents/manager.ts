@@ -26,6 +26,13 @@ export class IncidentManager {
     return this.active;
   }
 
+  reset(): void {
+    this.active = null;
+    this.clearTicks = 0;
+    this.stableTicks = 0;
+    this.remediationStarted = false;
+  }
+
   async observe(anomalies: Anomaly[], now: Date): Promise<void> {
     const at = now.toISOString();
 
@@ -65,7 +72,9 @@ export class IncidentManager {
 
     const incident = this.active;
     const diagnosis = diagnose(anomalies, this.options.dependencies());
-    incident.anomalies = anomalies;
+    if (!this.remediationStarted) {
+      incident.anomalies = anomalies;
+    }
 
     if (incident.state === "detected") {
       incident.state = "diagnosed";

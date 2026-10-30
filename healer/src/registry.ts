@@ -56,4 +56,14 @@ export class ServiceRegistry {
     this.records = await repo.listServices(this.db);
     return this.get(name);
   }
+
+  async reset(): Promise<void> {
+    for (const name of SERVICE_NAMES) {
+      await repo.updateServiceConfig(this.db, name, {
+        dependencies: [...SERVICE_DEPENDENCIES[name]],
+        allowedFixTypes: [...DEFAULT_FIX_TYPES],
+      });
+    }
+    this.records = await repo.listServices(this.db);
+  }
 }

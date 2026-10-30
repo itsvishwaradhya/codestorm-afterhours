@@ -29,6 +29,10 @@ export class ActionCap {
     this.stamps.push(this.now());
   }
 
+  reset(): void {
+    this.stamps = [];
+  }
+
   status(): CapStatus {
     this.prune();
     return {

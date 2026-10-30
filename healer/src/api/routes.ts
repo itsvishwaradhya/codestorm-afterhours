@@ -26,6 +26,7 @@ export interface ApiContext {
   audit: (entry: AuditInput) => Promise<void>;
   approvals: ApprovalGate;
   cap: ActionCap;
+  reset: () => Promise<boolean>;
 }
 
 type Handler = (req: Request, res: Response) => Promise<void>;
@@ -101,6 +102,18 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
     }),
   );
 
+  app.post(
+    "/api/reset",
+    wrap(async (_req, res) => {
+      const reset = await ctx.reset();
+      if (!reset) {
+        res.status(409).json({ error: "a remediation or reset is already in progress" });
+        return;
+      }
+      res.json({ ok: true });
+    }),
+  );
+
   app.get(
     "/api/incidents",
     wrap(async (_req, res) => {
@@ -135,6 +148,18 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
         return;
       }
       res.status(202).json({ decision: parsed.data.decision });
+    }),
+  );
+
+  app.get(
+    "/api/receipts/:incidentId",
+    wrap(async (req, res) => {
+      const receipt = await repo.getReceipt(ctx.db, String(req.params.incidentId));
+      if (!receipt) {
+        res.status(404).json({ error: "no receipt for that incident yet" });
+        return;
+      }
+      res.json(receipt);
     }),
   );
 

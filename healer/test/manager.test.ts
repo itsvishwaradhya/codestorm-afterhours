@@ -42,6 +42,22 @@ describe("incident manager", () => {
     expect(instance.current()?.rootCause).toBe("inventory");
   });
 
+  it("freezes the anomalies seen at diagnosis so a restart during the fix cannot rewrite the receipt", async () => {
+    const { instance } = manager();
+    const memory: Anomaly = {
+      service: "inventory",
+      kind: "memory",
+      value: 290,
+      threshold: 200,
+      since: at.toISOString(),
+    };
+    const orders = anomaly("orders", "error_rate");
+    await instance.observe([memory, orders], at);
+    await instance.observe([memory, orders], at);
+    await instance.observe([orders, anomaly("inventory", "unreachable")], at);
+    expect(instance.current()?.anomalies).toEqual([memory, orders]);
+  });
+
   it("starts a new incident for a fresh fault after the previous one cleared", async () => {
     const { instance, started } = manager();
     const payments = [anomaly("payments", "unreachable")];

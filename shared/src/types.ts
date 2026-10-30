@@ -136,6 +136,15 @@ export interface Attempt {
   endedAt: string | null;
 }
 
+export interface Receipt {
+  incidentId: string;
+  text: string;
+  draftText: string;
+  wordedBy: string;
+  facts: Record<string, unknown>;
+  createdAt: string;
+}
+
 export interface AuditEntry {
   id: string;
   at: string;

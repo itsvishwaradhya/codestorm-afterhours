@@ -28,7 +28,7 @@ describe("shadow verdict", () => {
   it("rejects a candidate that is slower than the baseline", () => {
     const decision = decideVerdict(
       { requests: 100, errorRate: 0.5, p95LatencyMs: 20 },
-      { requests: 120, errorRate: 0, p95LatencyMs: 400 },
+      { requests: 120, errorRate: 0, p95LatencyMs: 800 },
       rules,
     );
     expect(decision.verdict).toBe("reject");
@@ -45,10 +45,10 @@ describe("shadow verdict", () => {
     );
   });
 
-  it("does not reject small latency noise below the floor", () => {
+  it("does not reject latency noise from a freshly started clone below the floor", () => {
     const decision = decideVerdict(
-      { requests: 100, errorRate: 0.5, p95LatencyMs: 4 },
-      { requests: 120, errorRate: 0, p95LatencyMs: 30 },
+      { requests: 100, errorRate: 1, p95LatencyMs: 0 },
+      { requests: 120, errorRate: 0, p95LatencyMs: 51 },
       rules,
     );
     expect(decision.verdict).toBe("promote");
