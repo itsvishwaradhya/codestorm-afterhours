@@ -36,6 +36,11 @@ export const appFileSchema = z.object({
   content: z.string(),
 });
 
+export const appRenameSchema = z.object({
+  from: z.string().min(1).max(300),
+  to: z.string().min(1).max(300),
+});
+
 export const appExecSchema = z.object({
   command: z.string().trim().min(1).max(300),
 });

@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -55,12 +55,66 @@ export async function listFiles(root = APP_ROOT): Promise<{ path: string; size: 
   return out.sort((a, b) => a.path.localeCompare(b.path));
 }
 
-const sourceOnly = (root: string) => (source: string) => !path.relative(root, source).split(path.sep).some((part) => SKIP.has(part));
+export interface TreeEntry {
+  path: string;
+  size: number;
+  dir?: boolean;
+}
+
+// Files plus folders (so an empty new folder still shows in the explorer).
+export async function listTree(root = APP_ROOT): Promise<TreeEntry[]> {
+  const out: TreeEntry[] = [];
+  const walk = async (directory: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (SKIP.has(entry.name)) continue;
+      const absolute = path.join(directory, entry.name);
+      const relative = path.relative(root, absolute).split(path.sep).join("/");
+      if (entry.isDirectory()) {
+        out.push({ path: relative, size: 0, dir: true });
+        await walk(absolute);
+      } else {
+        out.push({ path: relative, size: (await stat(absolute)).size });
+      }
+    }
+  };
+  await walk(root);
+  return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+export async function makeAppDir(relative: string): Promise<boolean> {
+  const absolute = resolveAppPath(relative);
+  if (!absolute) return false;
+  await mkdir(absolute, { recursive: true });
+  return true;
+}
+
+export async function deleteAppPath(relative: string): Promise<boolean> {
+  const absolute = resolveAppPath(relative);
+  if (!absolute) return false;
+  await rm(absolute, { recursive: true, force: true });
+  return true;
+}
+
+export async function renameAppPath(from: string, to: string): Promise<boolean> {
+  const source = resolveAppPath(from);
+  const target = resolveAppPath(to);
+  if (!source || !target || (await stat(target).then(() => true, () => false))) return false;
+  await mkdir(path.dirname(target), { recursive: true });
+  await rename(source, target);
+  return true;
+}
+
+const sourceOnly =(root: string) => (source: string) => !path.relative(root, source).split(path.sep).some((part) => SKIP.has(part));
 
 // Last known good copy of the source (no node_modules), taken before every injected change.
+// Copied aside first and swapped in, so a failed copy never leaves the app without a good version.
 export async function snapshotGood(): Promise<void> {
+  const staging = `${GOOD_ROOT}.next`;
+  await rm(staging, { recursive: true, force: true });
+  await cp(APP_ROOT, staging, { recursive: true, filter: sourceOnly(APP_ROOT) });
   await rm(GOOD_ROOT, { recursive: true, force: true });
-  await cp(APP_ROOT, GOOD_ROOT, { recursive: true, filter: sourceOnly(APP_ROOT) });
+  await rename(staging, GOOD_ROOT);
 }
 
 export async function hasGoodSnapshot(): Promise<boolean> {

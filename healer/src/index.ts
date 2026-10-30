@@ -108,6 +108,17 @@ async function main(): Promise<void> {
   appHealer.start();
   process.on("exit", () => appHealer.stop());
 
+  // The browser terminal: replay scrollback on attach, then stream keystrokes and output both ways.
+  gateway.onClient((socket) => {
+    socket.on("pty-attach", () => socket.emit("pty-data", appHealer.terminal.history()));
+    socket.on("pty-input", (data: unknown) => {
+      if (typeof data === "string" && data.length <= 10_000) appHealer.terminal.input(data);
+    });
+    socket.on("pty-resize", (size: { cols?: unknown; rows?: unknown }) => {
+      if (typeof size?.cols === "number" && typeof size?.rows === "number") appHealer.terminal.resize(size.cols, size.rows);
+    });
+  });
+
   const verify = createVerifier({
     captures: async (service, sinceIso) => {
       const records = await repo.listCapturesSince(store.db, service, sinceIso, config.replay.limit);

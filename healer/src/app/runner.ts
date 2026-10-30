@@ -1,122 +1,127 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import net from "node:net";
 import path from "node:path";
-import { APP_ROOT, REPO_ROOT } from "./files.js";
-
-export const APP_PORT = 4501;
+import { REPO_ROOT } from "./files.js";
+import { APP_PORT, type AppTerminal } from "./terminal.js";
 
 export interface AppLog {
-  source: "app" | "shell" | "clone" | "nightshift";
+  source: "app" | "clone" | "nightshift";
   line: string;
   stream: "stdout" | "stderr" | "system";
   at: string;
 }
 
-// Commands that start a long-running server become the app process NightShift watches.
-const SERVER_COMMAND = /^(npm\s+(start|run\s+(dev|start|serve))|node\s+\S+|npx\s+nodemon\s+\S+)\s*$/;
-
-export const isServerCommand = (command: string): boolean => SERVER_COMMAND.test(command.trim());
+function killPid(pid: number): void {
+  if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+  else {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // already gone
+    }
+  }
+}
 
 // With shell: true, kill() only stops the shell on Windows; take the whole tree down.
 function killTree(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null || !child.pid) return resolve();
     child.once("exit", () => resolve());
-    if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-    else child.kill("SIGTERM");
+    killPid(child.pid);
     setTimeout(resolve, 3000);
   });
 }
 
-export async function waitForPort(port: number, timeoutMs: number): Promise<boolean> {
+// The process listening on a port, so NightShift can stop a server the user started in the terminal.
+export function portOwner(port: number): number | null {
+  try {
+    if (process.platform === "win32") {
+      const output = execFileSync("netstat", ["-ano", "-p", "TCP"], { encoding: "utf8" });
+      for (const row of output.split(/\r?\n/)) {
+        const cols = row.trim().split(/\s+/);
+        if (cols[3] === "LISTENING" && cols[1]?.endsWith(`:${port}`)) return Number(cols[4]) || null;
+      }
+      return null;
+    }
+    const output = execFileSync("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" });
+    return Number(output.split("\n")[0]) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function isPortOpen(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    const done = (open: boolean) => {
+      socket.destroy();
+      resolve(open);
+    };
+    socket.setTimeout(800, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+
+export async function waitForPort(port: number, timeoutMs: number, open = true): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1000) });
-      return true;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
+    if ((await isPortOpen(port)) === open) return true;
+    await new Promise((resolve) => setTimeout(resolve, 300));
   }
   return false;
 }
 
+// The app itself runs in the user's terminal. NightShift stops it by port and starts it again by
+// typing the user's own command, so the output stays where the user is looking.
 export class AppRunner {
-  private app: ChildProcess | null = null;
-  private command: string | null = null;
+  running = false;
 
-  constructor(private readonly onLog: (entry: AppLog) => void) {}
-
-  private log(source: AppLog["source"], line: string, stream: AppLog["stream"] = "system"): void {
-    this.onLog({ source, line, stream, at: new Date().toISOString() });
-  }
-
-  private launch(command: string, cwd: string, port: number, source: AppLog["source"]): ChildProcess {
-    const child = spawn(command, {
-      cwd,
-      shell: true,
-      env: {
-        ...process.env,
-        PORT: String(port),
-        NODE_PATH: path.join(REPO_ROOT, "node_modules"),
-        FORCE_COLOR: "0",
-      },
-    });
-    for (const stream of ["stdout", "stderr"] as const) {
-      let buffered = "";
-      child[stream]?.setEncoding("utf8");
-      child[stream]?.on("data", (chunk: string) => {
-        buffered += chunk;
-        const lines = buffered.split(/\r?\n/);
-        buffered = lines.pop() ?? "";
-        for (const line of lines) if (line.trim()) this.log(source, line, stream);
-      });
-    }
-    return child;
-  }
+  constructor(
+    private readonly terminal: AppTerminal,
+    private readonly onLog: (entry: AppLog) => void,
+  ) {}
 
   status(): { running: boolean; command: string | null; pid: number | null } {
-    const running = this.app !== null && this.app.exitCode === null && this.app.signalCode === null;
-    return { running, command: this.command, pid: running ? (this.app?.pid ?? null) : null };
-  }
-
-  async exec(command: string): Promise<void> {
-    if (isServerCommand(command)) {
-      await this.start(command);
-      return;
-    }
-    this.log("shell", `$ ${command}`);
-    const child = this.launch(command, APP_ROOT, APP_PORT, "shell");
-    child.on("exit", (code) => this.log("shell", `exited with code ${code}`));
-  }
-
-  async start(command: string): Promise<void> {
-    await this.stop();
-    this.command = command;
-    this.log("app", `starting \`${command}\` on port ${APP_PORT} (traffic goes through the proxy on 4500)`);
-    const child = this.launch(command, APP_ROOT, APP_PORT, "app");
-    this.app = child;
-    child.on("exit", (code) => {
-      if (this.app === child) this.log("app", `app process exited (code ${code})`, "stderr");
-    });
-  }
-
-  async restart(): Promise<void> {
-    if (this.command) await this.start(this.command);
+    return { running: this.running, command: this.terminal.lastServerCommand, pid: this.running ? portOwner(APP_PORT) : null };
   }
 
   async stop(): Promise<void> {
-    const old = this.app;
-    this.app = null;
-    if (old) {
-      await killTree(old);
-      this.log("app", "app process stopped");
+    const pid = portOwner(APP_PORT);
+    if (pid) {
+      killPid(pid);
+      await waitForPort(APP_PORT, 5000, false);
     }
+    this.running = false;
   }
 
-  // Starts the remembered server command in a clone directory for a shadow test.
+  async restart(): Promise<void> {
+    const command = this.terminal.lastServerCommand;
+    if (!command) return;
+    await this.stop();
+    // Give the shell a moment to print npm's exit before the next prompt.
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    this.terminal.run(command);
+  }
+
+  // Starts the remembered server command in a clone directory for a shadow test, out of sight.
   clone(cwd: string, port: number): { stop: () => Promise<void> } | null {
-    if (!this.command) return null;
-    const child = this.launch(this.command, cwd, port, "clone");
+    const command = this.terminal.lastServerCommand;
+    if (!command) return null;
+    const child = spawn(command, {
+      cwd,
+      shell: true,
+      env: { ...process.env, PORT: String(port), NODE_PATH: path.join(REPO_ROOT, "node_modules"), FORCE_COLOR: "0" },
+    });
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    const log = (stream: AppLog["stream"]) => (chunk: string) => {
+      for (const line of chunk.split(/\r?\n/)) {
+        if (line.trim()) this.onLog({ source: "clone", line, stream, at: new Date().toISOString() });
+      }
+    };
+    child.stdout?.on("data", log("stdout"));
+    child.stderr?.on("data", log("stderr"));
     return { stop: () => killTree(child) };
   }
 }

@@ -1,24 +1,64 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { io } from "socket.io-client";
-import { Bug, CheckCircle2, FileCode2, FolderUp, Loader2, Play, ShieldAlert, Square, SquareTerminal, XCircle } from "lucide-react";
+import {
+  Bug,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  ChevronsDownUp,
+  CircleDot,
+  Copy,
+  File,
+  FileCode2,
+  FileJson,
+  FilePlus2,
+  FileText,
+  Files,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  FolderUp,
+  Loader2,
+  Pencil,
+  Play,
+  RefreshCw,
+  ShieldAlert,
+  Square,
+  Trash2,
+  X,
+  XCircle,
+} from "lucide-react";
 import { api, type AppIncident, type AppLog, type AppState, type WorkspaceFile } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { percent } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { languageOf } from "./code-editor";
 import { StatusDot } from "./status";
-import { TAG_COLOR, TONE_COLOR, TreeItem, buildTree, line, type TermLine, type Tone } from "./workspace";
+import { TAG_COLOR, TONE_COLOR, line, type TermLine, type Tone } from "./workspace";
 
 const CodeEditor = lazy(() => import("./code-editor"));
+const XtermPanel = lazy(() => import("./xterm-panel"));
 
-const MAX_LINES = 600;
+const MAX_OUTPUT = 600;
 const MAX_UPLOAD_BYTES = 200 * 1024;
 const SKIP_DIRS = /(^|\/)(node_modules|\.git|dist|build|coverage)\//;
-const TEXT_FILE = /\.(c|m)?(j|t)sx?$|\.(json|md|txt|env\.example|html|css|ya?ml)$|(^|\/)[^.]+$/;
+const TEXT_FILE = /\.(c|m)?(j|t)sx?$|\.(json|md|txt|env\.example|html|css|scss|ya?ml|sh)$|(^|\/)[^.]+$/;
 const ENTRY_FILES = ["server.js", "index.js", "app.js", "src/server.js", "src/index.js", "src/app.js"];
 
-const PHASE_META: Record<AppIncident["phase"], { label: string; variant: "destructive" | "warning" | "success" | "default" | "muted" }> = {
+const PHASE_META: Record<AppIncident["phase"], { label: string; variant: "destructive" | "warning" | "success" | "default" }> = {
   detected: { label: "Detected", variant: "destructive" },
   verifying: { label: "Shadow testing", variant: "warning" },
   promoting: { label: "Applying fix", variant: "warning" },
@@ -27,97 +67,295 @@ const PHASE_META: Record<AppIncident["phase"], { label: string; variant: "destru
   escalated: { label: "Escalated", variant: "destructive" },
 };
 
-const HELP = [
-  "npm install / npm start / node server.js   any command runs in your app folder",
-  "                                          (npm start, npm run dev, node <file> become the watched server)",
-  "inject                                    let the AI inject a bug into your code",
-  "stop                                      stop the app",
-  "status                                    health as NightShift sees it",
-  "open <file>                               open a file in the editor",
-  "cls                                       clear the terminal",
-];
+interface Tab {
+  path: string;
+  content: string;
+  saved: string;
+}
+
+interface Node {
+  name: string;
+  path: string;
+  dir: boolean;
+  children: Node[];
+}
+
+type Pending =
+  | { kind: "file" | "folder"; parent: string; value: string }
+  | { kind: "rename"; parent: string; path: string; value: string };
+
+interface Menu {
+  x: number;
+  y: number;
+  node: Node | null;
+}
+
+const parentOf = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
+const nameOf = (path: string) => path.split("/").pop() ?? path;
+const join = (parent: string, name: string) => (parent ? `${parent}/${name}` : name);
+
+function buildTree(entries: WorkspaceFile[]): Node {
+  const root: Node = { name: "", path: "", dir: true, children: [] };
+  const index = new Map<string, Node>([["", root]]);
+  const ensureDir = (path: string): Node => {
+    const existing = index.get(path);
+    if (existing) return existing;
+    const node: Node = { name: nameOf(path), path, dir: true, children: [] };
+    index.set(path, node);
+    ensureDir(parentOf(path)).children.push(node);
+    return node;
+  };
+  for (const entry of entries) {
+    if (entry.dir) ensureDir(entry.path);
+    else ensureDir(parentOf(entry.path)).children.push({ name: nameOf(entry.path), path: entry.path, dir: false, children: [] });
+  }
+  const sort = (node: Node) => {
+    node.children.sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
+    node.children.forEach(sort);
+  };
+  sort(root);
+  return root;
+}
+
+function FileIcon({ path, className }: { path: string; className?: string }) {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "json") return <FileJson className={cn("text-amber-300", className)} />;
+  if (["js", "mjs", "cjs", "jsx"].includes(ext)) return <FileCode2 className={cn("text-yellow-300", className)} />;
+  if (["ts", "tsx"].includes(ext)) return <FileCode2 className={cn("text-sky-400", className)} />;
+  if (["md", "txt"].includes(ext)) return <FileText className={cn("text-sky-200", className)} />;
+  return <File className={cn("text-zinc-400", className)} />;
+}
 
 function toneFor(entry: AppLog): Tone {
   if (entry.stream === "stderr") return "error";
-  if (entry.source === "nightshift") return entry.stream === "stdout" ? "ok" : "warn";
-  if (entry.stream === "system") return "muted";
-  return "info";
+  if (entry.source === "nightshift") return entry.stream === "stdout" ? "ok" : "info";
+  return "muted";
+}
+
+function NameInput({ initial, onSubmit, onCancel, depth, icon }: {
+  initial: string;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+  depth: number;
+  icon: "file" | "folder";
+}) {
+  const [value, setValue] = useState(initial);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const input = ref.current;
+    if (!input) return;
+    input.focus();
+    const dot = initial.lastIndexOf(".");
+    input.setSelectionRange(0, dot > 0 ? dot : initial.length);
+  }, [initial]);
+  const onKey = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    event.stopPropagation();
+    if (event.key === "Enter" && value.trim()) onSubmit(value.trim());
+    if (event.key === "Escape") onCancel();
+  };
+  return (
+    <div className="flex items-center gap-1.5 py-0.5 pr-2" style={{ paddingLeft: 8 + depth * 12 + 14 }}>
+      {icon === "folder" ? <Folder className="size-3.5 shrink-0 text-amber-300" /> : <File className="size-3.5 shrink-0 text-zinc-400" />}
+      <input
+        ref={ref}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={onKey}
+        onBlur={() => (value.trim() && value.trim() !== initial ? onSubmit(value.trim()) : onCancel())}
+        className="min-w-0 flex-1 border border-[#007fd4] bg-[#3c3c3c] px-1 text-[13px] text-zinc-100 outline-none"
+        spellCheck={false}
+      />
+    </div>
+  );
 }
 
 export function AppWorkspace() {
-  const [files, setFiles] = useState<WorkspaceFile[] | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [content, setContent] = useState<string | null>(null);
-  const [open, setOpen] = useState<Set<string>>(() => new Set());
+  const [entries, setEntries] = useState<WorkspaceFile[] | null>(null);
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [active, setActive] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Node | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [pending, setPending] = useState<Pending | null>(null);
+  const [menu, setMenu] = useState<Menu | null>(null);
   const [state, setState] = useState<AppState | null>(null);
   const [incident, setIncident] = useState<AppIncident | null>(null);
-  const [lines, setLines] = useState<TermLine[]>([]);
-  const [input, setInput] = useState("");
-  const [history, setHistory] = useState<string[]>([]);
-  const [cursor, setCursor] = useState<number | null>(null);
+  const [output, setOutput] = useState<TermLine[]>([]);
+  const [panel, setPanel] = useState<"terminal" | "output">("terminal");
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [uploading, setUploading] = useState<string | null>(null);
   const [injecting, setInjecting] = useState(false);
-  const scroller = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const folderRef = useRef<HTMLInputElement>(null);
-  const selectedRef = useRef<string | null>(null);
-  selectedRef.current = selected;
+  const outputRef = useRef<HTMLDivElement>(null);
+  const tabsRef = useRef<Tab[]>([]);
+  tabsRef.current = tabs;
+  const epochRef = useRef(0);
 
-  const push = useCallback((...added: TermLine[]) => setLines((current) => [...current, ...added].slice(-MAX_LINES)), []);
-  const say = useCallback((text: string, tone: Tone = "info") => push(line("nightshift", text, tone)), [push]);
+  const files = useMemo(() => (entries ?? []).filter((entry) => !entry.dir), [entries]);
+  const tree = useMemo(() => buildTree(entries ?? []), [entries]);
+  const activeTab = tabs.find((tab) => tab.path === active) ?? null;
 
-  const loadFile = useCallback((path: string) => {
-    setSelected(path);
-    setContent(null);
-    api.app
-      .file(path)
-      .then((file) => setContent(file.content))
-      .catch(() => setContent(`// could not load ${path}`));
+  const say = useCallback((text: string, tone: Tone = "info") => {
+    setOutput((current) => [...current, line("nightshift", text, tone)].slice(-MAX_OUTPUT));
   }, []);
 
-  const showFiles = useCallback(
-    (list: WorkspaceFile[]) => {
-      setFiles(list);
-      setOpen(new Set(list.flatMap((file) => file.path.split("/").slice(0, -1).map((_, index, parts) => parts.slice(0, index + 1).join("/")))));
-      const entry =
-        ENTRY_FILES.find((name) => list.some((file) => file.path === name)) ??
-        list.find((file) => /\.(c|m)?js$/.test(file.path))?.path ??
-        list[0]?.path;
-      if (entry && !selectedRef.current) loadFile(entry);
+  const flash = useCallback((text: string) => {
+    setNotice(text);
+    setTimeout(() => setNotice((current) => (current === text ? null : current)), 3000);
+  }, []);
+
+  const openFile = useCallback(async (path: string) => {
+    setActive(path);
+    if (tabsRef.current.some((tab) => tab.path === path)) return;
+    // A load that started before a new folder was opened must not bring the old file back.
+    const started = epochRef.current;
+    const file = await api.app.file(path).catch(() => ({ path, content: "" }));
+    if (epochRef.current !== started) return;
+    setTabs((current) =>
+      current.some((tab) => tab.path === path) ? current : [...current, { path, content: file.content, saved: file.content }],
+    );
+  }, []);
+
+  // Pick up changes made on disk by NightShift (injection, rollback) in tabs with no unsaved edits.
+  const reloadClean = useCallback(async () => {
+    for (const tab of tabsRef.current) {
+      if (tab.content !== tab.saved) continue;
+      const file = await api.app.file(tab.path).catch(() => null);
+      if (file && file.content !== tab.saved) {
+        setTabs((current) => current.map((item) => (item.path === tab.path ? { ...item, content: file.content, saved: file.content } : item)));
+      }
+    }
+  }, []);
+
+  const showTree = useCallback(
+    (list: WorkspaceFile[], openEntry = false) => {
+      setEntries(list);
+      if (openEntry) {
+        setExpanded(new Set(list.filter((entry) => entry.dir).map((entry) => entry.path)));
+        const firstFiles = list.filter((entry) => !entry.dir);
+        const entry =
+          ENTRY_FILES.find((name) => firstFiles.some((file) => file.path === name)) ??
+          firstFiles.find((file) => /\.(c|m)?js$/.test(file.path))?.path ??
+          firstFiles[0]?.path;
+        if (entry) void openFile(entry);
+      }
     },
-    [loadFile],
+    [openFile],
   );
 
+  const refreshTree = useCallback(() => api.app.tree().then((list) => showTree(list)).catch(() => setEntries([])), [showTree]);
+
   useEffect(() => {
-    api.app.tree().then(showFiles).catch(() => setFiles([]));
-    const refresh = () => api.app.state().then((next) => {
-      setState(next);
-      setIncident(next.incident);
-    }).catch(() => undefined);
+    api.app.tree().then((list) => showTree(list, true)).catch(() => setEntries([]));
+    const refresh = () =>
+      api.app
+        .state()
+        .then((next) => {
+          setState(next);
+          setIncident(next.incident);
+        })
+        .catch(() => undefined);
     void refresh();
     const poll = setInterval(refresh, 2000);
 
     const socket = io();
-    socket.on("app-log", (entry: AppLog) => push(line(entry.source, entry.line, toneFor(entry), entry.at)));
+    socket.on("app-log", (entry: AppLog) =>
+      setOutput((current) => [...current, line(entry.source, entry.line, toneFor(entry), entry.at)].slice(-MAX_OUTPUT)),
+    );
     socket.on("app-incident", (next: AppIncident | null) => {
       setIncident(next);
-      // Show the code as it is now after an injection or a rollback.
-      if (next && ["detected", "resolved"].includes(next.phase) && selectedRef.current) loadFile(selectedRef.current);
+      if (next && ["detected", "watching", "resolved"].includes(next.phase)) void reloadClean();
     });
     return () => {
       clearInterval(poll);
       socket.disconnect();
     };
-  }, [loadFile, push, showFiles]);
+  }, [reloadClean, showTree]);
 
   useEffect(() => {
-    scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
-  }, [lines]);
+    outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight });
+  }, [output, panel]);
 
-  const tree = useMemo(() => buildTree(files ?? []), [files]);
+  // ---- editor actions --------------------------------------------------------------------
+  const save = useCallback(
+    async (path = active) => {
+      const tab = tabsRef.current.find((item) => item.path === path);
+      if (!tab) return;
+      try {
+        await api.app.save(tab.path, tab.content);
+        setTabs((current) => current.map((item) => (item.path === tab.path ? { ...item, saved: tab.content } : item)));
+        flash(`Saved ${tab.path}`);
+        if (state?.running) say(`${tab.path} saved. Restart the app in the terminal (Ctrl+C, then ↑ Enter) to run the change.`, "muted");
+      } catch (error) {
+        flash(`Could not save ${tab.path}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    [active, flash, say, state?.running],
+  );
+
+  const closeTab = (path: string, event?: ReactMouseEvent) => {
+    event?.stopPropagation();
+    const tab = tabs.find((item) => item.path === path);
+    if (tab && tab.content !== tab.saved && !window.confirm(`Discard unsaved changes to ${nameOf(path)}?`)) return;
+    const index = tabs.findIndex((item) => item.path === path);
+    const next = tabs.filter((item) => item.path !== path);
+    setTabs(next);
+    if (active === path) setActive(next[Math.min(index, next.length - 1)]?.path ?? null);
+  };
+
+  // ---- explorer actions ------------------------------------------------------------------
+  const targetFolder = (node: Node | null) => (node ? (node.dir ? node.path : parentOf(node.path)) : "");
+
+  const startCreate = (kind: "file" | "folder", node: Node | null = selected) => {
+    const parent = targetFolder(node);
+    if (parent) setExpanded((current) => new Set(current).add(parent));
+    setPending({ kind, parent, value: "" });
+    setMenu(null);
+  };
+
+  const commitPending = async (value: string) => {
+    const current = pending;
+    setPending(null);
+    if (!current || value.includes("..")) return;
+    try {
+      if (current.kind === "folder") {
+        showTree(await api.app.mkdir(join(current.parent, value)));
+      } else if (current.kind === "file") {
+        const path = join(current.parent, value);
+        await api.app.save(path, "");
+        await refreshTree();
+        void openFile(path);
+      } else if (current.kind === "rename") {
+        const from = current.path;
+        const to = join(current.parent, value);
+        const moved = (path: string) => path === from || path.startsWith(`${from}/`);
+        showTree(await api.app.rename(from, to));
+        setTabs((list) => list.map((tab) => (moved(tab.path) ? { ...tab, path: to + tab.path.slice(from.length) } : tab)));
+        setActive((path) => (path && moved(path) ? to + path.slice(from.length) : path));
+      }
+    } catch (error) {
+      flash(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const remove = async (node: Node) => {
+    setMenu(null);
+    const what = node.dir ? `the folder '${node.name}' and its contents` : `'${node.name}'`;
+    if (!window.confirm(`Are you sure you want to delete ${what}?`)) return;
+    showTree(await api.app.remove(node.path));
+    const gone = (path: string) => path === node.path || path.startsWith(`${node.path}/`);
+    const remaining = tabs.filter((tab) => !gone(tab.path));
+    setTabs(remaining);
+    setActive((path) => (path && gone(path) ? (remaining[remaining.length - 1]?.path ?? null) : path));
+    if (selected?.path === node.path) setSelected(null);
+  };
 
   const toggle = (path: string) =>
-    setOpen((current) => {
+    setExpanded((current) => {
       const next = new Set(current);
       if (next.has(path)) next.delete(path);
       else next.add(path);
@@ -130,19 +368,23 @@ export function AppWorkspace() {
     if (picked.length === 0) return;
     const usable = picked
       .map((file) => ({ file, path: file.webkitRelativePath.split("/").slice(1).join("/") || file.name }))
-      .filter(({ file, path }) => !SKIP_DIRS.test(`${path}`) && file.size <= MAX_UPLOAD_BYTES && TEXT_FILE.test(path));
+      .filter(({ file, path }) => !SKIP_DIRS.test(path) && file.size <= MAX_UPLOAD_BYTES && TEXT_FILE.test(path));
     try {
-      setUploading(`0 / ${usable.length}`);
+      setUploading(`0/${usable.length}`);
+      epochRef.current += 1;
       await api.app.reset();
+      setTabs([]);
+      setActive(null);
       setSelected(null);
-      setContent(null);
       for (const [index, { file, path }] of usable.entries()) {
         await api.app.upload(path, await file.text());
-        setUploading(`${index + 1} / ${usable.length}`);
+        setUploading(`${index + 1}/${usable.length}`);
       }
-      showFiles(await api.app.uploaded());
+      showTree(await api.app.uploaded(), true);
       say(`uploaded ${usable.length} files (skipped ${picked.length - usable.length}: node_modules, binaries, large files)`, "ok");
-      say("next: run npm install if it has dependencies, then npm start", "muted");
+      flash(`Opened ${usable.length} files. Run npm install / npm start in the terminal.`);
+      setPanel("terminal");
+      setPanelOpen(true);
     } catch (error) {
       say(`upload failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
@@ -152,9 +394,14 @@ export function AppWorkspace() {
 
   const inject = async () => {
     setInjecting(true);
+    setPanel("output");
+    setPanelOpen(true);
     try {
       const result = await api.app.inject();
-      if (result) loadFile(result.file);
+      if (result) {
+        await reloadClean();
+        void openFile(result.file);
+      }
     } catch (error) {
       say(`inject failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
@@ -162,178 +409,410 @@ export function AppWorkspace() {
     }
   };
 
-  const run = async (raw: string) => {
-    const command = raw.trim();
-    if (!command) return;
-    push(line("$", command, "cmd"));
-    const [name, ...args] = command.split(/\s+/);
-    switch (name.toLowerCase()) {
-      case "help":
-        HELP.forEach((entry) => say(entry, "muted"));
-        return;
-      case "cls":
-      case "clear":
-        setLines([]);
-        return;
-      case "inject":
-        await inject();
-        return;
-      case "stop":
-        await api.app.stop();
-        return;
-      case "status": {
-        if (!state) return say("no state yet", "muted");
-        const health = state.health;
-        say(
-          `${state.running ? `running \`${state.command}\` (pid ${state.pid})` : "not running"} · ${health.requests} req in 4s · errors ${percent(health.errorRate)} · p95 ${health.p95Ms} ms`,
-          state.running && health.errorRate < 0.05 ? "ok" : "warn",
-        );
-        say(`routes under watch: ${state.routes.join(", ")}`, "muted");
-        return;
+  // ---- keyboard shortcuts ----------------------------------------------------------------
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod) return;
+      const key = event.key.toLowerCase();
+      if (key === "p" && !event.shiftKey) {
+        event.preventDefault();
+        setQuery("");
+        setQuickOpen(true);
+      } else if (key === "s") {
+        event.preventDefault();
+        void save();
+      } else if (key === "`" || event.code === "Backquote") {
+        event.preventDefault();
+        setPanel("terminal");
+        setPanelOpen((open) => !open || panel !== "terminal");
+      } else if (key === "b") {
+        event.preventDefault();
+        setSidebarOpen((open) => !open);
       }
-      case "open": {
-        const match = (files ?? []).find((file) => file.path === args[0] || file.path.endsWith(`/${args[0]}`));
-        if (!match) return say(`no file matches ${args[0] ?? "''"}`, "error");
-        loadFile(match.path);
-        return;
-      }
-      default:
-        try {
-          await api.app.exec(command);
-        } catch (error) {
-          say(`command failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-        }
-    }
-  };
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [panel, save]);
 
-  const onKey = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter") {
-      const value = input;
-      setInput("");
-      setCursor(null);
-      if (value.trim()) setHistory((current) => [...current, value].slice(-50));
-      void run(value);
-    } else if (event.key === "ArrowUp" && history.length) {
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [menu]);
+
+  const matches = useMemo(() => {
+    const needle = query.toLowerCase();
+    const scored = files
+      .map((file) => {
+        const name = nameOf(file.path).toLowerCase();
+        const at = name.indexOf(needle);
+        const inPath = file.path.toLowerCase().indexOf(needle);
+        return { file, score: needle === "" ? 0 : at === 0 ? 0 : at > 0 ? 1 : inPath >= 0 ? 2 : -1 };
+      })
+      .filter((item) => item.score >= 0)
+      .sort((a, b) => a.score - b.score || a.file.path.localeCompare(b.file.path));
+    return scored.slice(0, 12).map((item) => item.file);
+  }, [files, query]);
+  const [pick, setPick] = useState(0);
+  useEffect(() => setPick(0), [query, quickOpen]);
+
+  // ---- render helpers ----------------------------------------------------------------------
+  const renderNode = (node: Node, depth: number): React.ReactNode => {
+    const isRenaming = pending?.kind === "rename" && pending.path === node.path;
+    const indent = { paddingLeft: 8 + depth * 12 };
+    const onContext = (event: ReactMouseEvent) => {
       event.preventDefault();
-      const index = cursor === null ? history.length - 1 : Math.max(0, cursor - 1);
-      setCursor(index);
-      setInput(history[index]);
-    } else if (event.key === "ArrowDown" && cursor !== null) {
-      event.preventDefault();
-      const index = cursor + 1;
-      setCursor(index >= history.length ? null : index);
-      setInput(index >= history.length ? "" : history[index]);
+      event.stopPropagation();
+      setSelected(node);
+      setMenu({ x: event.clientX, y: event.clientY, node });
+    };
+    const creatingHere = pending && pending.kind !== "rename" && pending.parent === node.path;
+
+    if (isRenaming) {
+      return (
+        <NameInput
+          key={node.path}
+          initial={node.name}
+          depth={depth - 1}
+          icon={node.dir ? "folder" : "file"}
+          onSubmit={(value) => void commitPending(value)}
+          onCancel={() => setPending(null)}
+        />
+      );
     }
+
+    if (!node.dir) {
+      const tab = tabs.find((item) => item.path === node.path);
+      return (
+        <button
+          key={node.path}
+          onClick={() => {
+            setSelected(node);
+            void openFile(node.path);
+          }}
+          onContextMenu={onContext}
+          style={{ paddingLeft: indent.paddingLeft + 14 }}
+          className={cn(
+            "flex w-full items-center gap-1.5 truncate py-[3px] pr-2 text-left text-[13px] hover:bg-[#2a2d2e]",
+            active === node.path ? "bg-[#37373d] text-white" : "text-[#cccccc]",
+            selected?.path === node.path && "outline outline-1 -outline-offset-1 outline-[#007fd4]",
+          )}
+        >
+          <FileIcon path={node.path} className="size-3.5 shrink-0" />
+          <span className="truncate">{node.name}</span>
+          {tab && tab.content !== tab.saved && <CircleDot className="ml-auto size-3 shrink-0 text-zinc-300" />}
+        </button>
+      );
+    }
+
+    const open = expanded.has(node.path);
+    return (
+      <div key={node.path}>
+        <button
+          onClick={() => {
+            setSelected(node);
+            toggle(node.path);
+          }}
+          onContextMenu={onContext}
+          style={indent}
+          className={cn(
+            "flex w-full items-center gap-1 py-[3px] pr-2 text-left text-[13px] text-[#cccccc] hover:bg-[#2a2d2e]",
+            selected?.path === node.path && "outline outline-1 -outline-offset-1 outline-[#007fd4]",
+          )}
+        >
+          {open ? <ChevronDown className="size-3.5 shrink-0" /> : <ChevronRight className="size-3.5 shrink-0" />}
+          {open ? <FolderOpen className="size-3.5 shrink-0 text-amber-300" /> : <Folder className="size-3.5 shrink-0 text-amber-300" />}
+          <span className="truncate">{node.name}</span>
+        </button>
+        {open && (
+          <>
+            {creatingHere && (
+              <NameInput
+                initial=""
+                depth={depth + 1}
+                icon={pending.kind === "folder" ? "folder" : "file"}
+                onSubmit={(value) => void commitPending(value)}
+                onCancel={() => setPending(null)}
+              />
+            )}
+            {node.children.map((child) => renderNode(child, depth + 1))}
+          </>
+        )}
+      </div>
+    );
   };
 
   const health = state?.health;
-  const empty = files !== null && files.length === 0;
+  const failing = Boolean(health && state?.running && health.errorRate >= 0.15);
   const live = incident && incident.phase !== "resolved" && incident.phase !== "escalated";
+  const empty = entries !== null && entries.length === 0;
+  const projectName = state?.command ? "my-app" : "my-app";
 
   return (
-    <div className="grid h-[calc(100vh-10.5rem)] min-h-[560px] gap-3 lg:grid-cols-[230px_minmax(0,1fr)_300px]">
-      {/* Explorer */}
-      <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-[#1b1b1f]">
-        <header className="flex items-center justify-between border-b border-white/10 px-3 py-1.5">
-          <span className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">Explorer · my app</span>
-          <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => folderRef.current?.click()} disabled={uploading !== null}>
-            {uploading ? <Loader2 className="animate-spin" /> : <FolderUp />}
-            {uploading ?? "Upload"}
-          </Button>
-          <input ref={folderRef} type="file" multiple className="hidden" onChange={(event) => void onUpload(event)} {...{ webkitdirectory: "" }} />
-        </header>
-        <div className="min-h-0 flex-1 overflow-y-auto py-1">
-          {files === null ? (
-            Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="mx-3 my-1.5 h-4" />)
-          ) : empty ? (
+    <div className="relative flex h-[calc(100vh-10.5rem)] min-h-[560px] gap-3">
+      {/* VS Code window */}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[#2b2b2b] bg-[#1f1f1f] text-[#cccccc]">
+        <div className="flex min-h-0 flex-1">
+          {/* Activity bar */}
+          <div className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-[#2b2b2b] bg-[#181818] py-2">
             <button
-              onClick={() => folderRef.current?.click()}
-              className="m-3 flex w-[calc(100%-1.5rem)] flex-col items-center gap-2 rounded-lg border border-dashed border-white/15 px-3 py-8 text-center text-xs text-zinc-400 hover:border-indigo-400/50 hover:text-zinc-200"
+              title="Explorer (Ctrl+B)"
+              onClick={() => setSidebarOpen((open) => !open)}
+              className={cn("grid size-10 place-items-center border-l-2", sidebarOpen ? "border-white text-white" : "border-transparent text-zinc-500 hover:text-zinc-300")}
             >
-              <FolderUp className="size-6 text-indigo-300" />
-              Upload your Node/Express project folder
-              <span className="text-zinc-500">node_modules is skipped</span>
+              <Files className="size-5" />
             </button>
-          ) : (
-            [...tree.children.values()].map((node) => (
-              <TreeItem key={node.path} node={node} depth={0} selected={selected ?? ""} open={open} onToggle={toggle} onOpen={loadFile} />
-            ))
-          )}
-        </div>
-      </section>
+            <button title="Quick open (Ctrl+P)" onClick={() => setQuickOpen(true)} className="grid size-10 place-items-center border-l-2 border-transparent text-zinc-500 hover:text-zinc-300">
+              <FileCode2 className="size-5" />
+            </button>
+          </div>
 
-      {/* Editor + terminal */}
-      <section className="flex min-h-0 flex-col gap-3">
-        <div className="flex min-h-0 flex-[3] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#1e1e1e]">
-          <header className="flex items-center justify-between border-b border-white/10 bg-[#252526] px-3 py-1.5">
-            <span className="flex items-center gap-1.5 font-mono text-xs text-zinc-200">
-              <FileCode2 className="size-3.5 text-sky-400" />
-              {selected ?? "no file open"}
+          {/* Explorer */}
+          {sidebarOpen && (
+            <aside className="flex w-60 shrink-0 flex-col border-r border-[#2b2b2b] bg-[#181818]">
+              <div className="flex h-9 items-center justify-between px-4 text-[11px] uppercase tracking-wide text-[#bbbbbb]">Explorer</div>
+              <div className="group flex h-6 items-center justify-between pl-1 pr-1 text-[11px] font-bold uppercase text-[#cccccc]">
+                <span className="flex items-center gap-0.5">
+                  <ChevronDown className="size-3.5" />
+                  {projectName}
+                </span>
+                <span className="flex items-center gap-0.5 opacity-80">
+                  {[
+                    { title: "New File...", icon: FilePlus2, run: () => startCreate("file") },
+                    { title: "New Folder...", icon: FolderPlus, run: () => startCreate("folder") },
+                    { title: "Refresh Explorer", icon: RefreshCw, run: () => void refreshTree() },
+                    { title: "Collapse Folders in Explorer", icon: ChevronsDownUp, run: () => setExpanded(new Set()) },
+                    { title: "Open Folder (upload)", icon: FolderUp, run: () => folderRef.current?.click() },
+                  ].map((action) => (
+                    <button key={action.title} title={action.title} onClick={action.run} className="grid size-5 place-items-center rounded hover:bg-[#3c3c3c]">
+                      <action.icon className="size-3.5" />
+                    </button>
+                  ))}
+                </span>
+              </div>
+              <input ref={folderRef} type="file" multiple className="hidden" onChange={(event) => void onUpload(event)} {...{ webkitdirectory: "" }} />
+              <div
+                className="min-h-0 flex-1 overflow-y-auto pb-6"
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setSelected(null);
+                  setMenu({ x: event.clientX, y: event.clientY, node: null });
+                }}
+                onClick={(event) => {
+                  if (event.target === event.currentTarget) setSelected(null);
+                }}
+              >
+                {uploading && (
+                  <p className="flex items-center gap-2 px-4 py-2 text-xs text-zinc-400">
+                    <Loader2 className="size-3.5 animate-spin" />
+                    Uploading {uploading}
+                  </p>
+                )}
+                {entries === null ? (
+                  Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="mx-4 my-1.5 h-3.5 bg-zinc-700/40" />)
+                ) : empty && !pending ? (
+                  <div className="space-y-3 px-4 py-3 text-[13px] text-[#cccccc]">
+                    <p>You have not yet opened a folder.</p>
+                    <button onClick={() => folderRef.current?.click()} className="w-full rounded-sm bg-[#0078d4] py-1.5 text-white hover:bg-[#026ec1]">
+                      Open Folder
+                    </button>
+                    <p className="text-xs text-zinc-500">Pick a Node/Express project. node_modules is skipped.</p>
+                  </div>
+                ) : (
+                  <>
+                    {pending && pending.kind !== "rename" && pending.parent === "" && (
+                      <NameInput
+                        initial=""
+                        depth={0}
+                        icon={pending.kind === "folder" ? "folder" : "file"}
+                        onSubmit={(value) => void commitPending(value)}
+                        onCancel={() => setPending(null)}
+                      />
+                    )}
+                    {tree.children.map((child) => renderNode(child, 0))}
+                  </>
+                )}
+              </div>
+            </aside>
+          )}
+
+          {/* Editor group + panel */}
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex h-9 shrink-0 overflow-x-auto bg-[#181818]">
+                {tabs.map((tab) => {
+                  const dirty = tab.content !== tab.saved;
+                  const isActive = tab.path === active;
+                  return (
+                    <div
+                      key={tab.path}
+                      onClick={() => setActive(tab.path)}
+                      onAuxClick={(event) => event.button === 1 && closeTab(tab.path)}
+                      title={tab.path}
+                      className={cn(
+                        "group flex shrink-0 cursor-pointer items-center gap-1.5 border-r border-[#2b2b2b] pl-3 pr-1.5 text-[13px]",
+                        isActive ? "border-t border-t-[#0078d4] bg-[#1f1f1f] text-white" : "bg-[#181818] text-[#9d9d9d] hover:text-[#cccccc]",
+                      )}
+                    >
+                      <FileIcon path={tab.path} className="size-3.5" />
+                      {nameOf(tab.path)}
+                      <button
+                        onClick={(event) => closeTab(tab.path, event)}
+                        className="grid size-5 place-items-center rounded hover:bg-[#3c3c3c]"
+                        title="Close"
+                      >
+                        {dirty ? (
+                          <>
+                            <span className="size-2 rounded-full bg-[#cccccc] group-hover:hidden" />
+                            <X className="hidden size-3.5 group-hover:block" />
+                          </>
+                        ) : (
+                          <X className={cn("size-3.5", isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100")} />
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {activeTab && (
+                <div className="flex h-6 shrink-0 items-center gap-1 px-3 text-xs text-[#a9a9a9]">
+                  {activeTab.path.split("/").map((part, index, parts) => (
+                    <span key={index} className="flex items-center gap-1">
+                      {index > 0 && <ChevronRight className="size-3" />}
+                      {index === parts.length - 1 && <FileIcon path={activeTab.path} className="size-3" />}
+                      {part}
+                    </span>
+                  ))}
+                  {incident?.injection?.file === activeTab.path && live && (
+                    <Badge variant="destructive" className="ml-2 h-4 text-[10px]">
+                      bug injected here
+                    </Badge>
+                  )}
+                </div>
+              )}
+              <div className="min-h-0 flex-1">
+                {activeTab ? (
+                  <Suspense fallback={<Skeleton className="m-4 h-40" />}>
+                    <CodeEditor
+                      path={`app/${activeTab.path}`}
+                      content={activeTab.content}
+                      readOnly={false}
+                      onChange={(value) =>
+                        setTabs((current) => current.map((tab) => (tab.path === activeTab.path ? { ...tab, content: value } : tab)))
+                      }
+                      onSave={() => void save(activeTab.path)}
+                      onCursor={(lineNumber, column) => setCursor({ line: lineNumber, column })}
+                    />
+                  </Suspense>
+                ) : (
+                  <div className="grid h-full place-items-center text-center text-sm text-[#6e6e6e]">
+                    <div className="space-y-1.5">
+                      <p className="text-base text-[#8b8b8b]">NightShift Workspace</p>
+                      <p>Show All Files · Ctrl + P</p>
+                      <p>Toggle Terminal · Ctrl + `</p>
+                      <p>Save · Ctrl + S</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Panel: always mounted so the terminal keeps its state */}
+            <div className={cn("flex h-[38%] min-h-[160px] shrink-0 flex-col border-t border-[#2b2b2b] bg-[#181818]", !panelOpen && "hidden")}>
+              <div className="flex h-8 shrink-0 items-center justify-between px-3">
+                <div className="flex gap-4 text-[11px] uppercase tracking-wide">
+                  {(["terminal", "output"] as const).map((id) => (
+                    <button
+                      key={id}
+                      onClick={() => setPanel(id)}
+                      className={cn("border-b pb-1 pt-1.5", panel === id ? "border-[#e7e7e7] text-[#e7e7e7]" : "border-transparent text-[#9d9d9d] hover:text-[#cccccc]")}
+                    >
+                      {id === "terminal" ? "Terminal" : "Output · NightShift"}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-1">
+                  {panel === "terminal" && <span className="mr-2 text-[11px] text-[#9d9d9d]">powershell · my-app</span>}
+                  {panel === "output" && (
+                    <button title="Clear Output" onClick={() => setOutput([])} className="grid size-6 place-items-center rounded hover:bg-[#3c3c3c]">
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  )}
+                  <button title="Close Panel (Ctrl+`)" onClick={() => setPanelOpen(false)} className="grid size-6 place-items-center rounded hover:bg-[#3c3c3c]">
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+              <div className="relative min-h-0 flex-1">
+                <div className={cn("absolute inset-0", panel !== "terminal" && "invisible")}>
+                  <Suspense fallback={<p className="p-3 text-xs text-zinc-500">Starting terminal…</p>}>
+                    <XtermPanel visible={panelOpen && panel === "terminal"} />
+                  </Suspense>
+                </div>
+                <div ref={outputRef} className={cn("absolute inset-0 overflow-y-auto px-3 py-1 font-mono text-[12.5px] leading-relaxed", panel !== "output" && "invisible")}>
+                  {output.length === 0 && <p className="text-zinc-500">NightShift's detections, shadow tests and fixes appear here.</p>}
+                  {output.map((entry) => (
+                    <div key={entry.id} className="flex gap-2 whitespace-pre-wrap break-words">
+                      <span className="shrink-0 text-zinc-600">{entry.at.slice(11, 19)}</span>
+                      <span className={cn("shrink-0", TAG_COLOR[entry.tag] ?? "text-zinc-400")}>[{entry.tag}]</span>
+                      <span className={TONE_COLOR[entry.tone]}>{entry.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Status bar */}
+        <div className={cn("flex h-6 shrink-0 items-center justify-between px-2 text-[12px] text-white", live ? "bg-[#c72e0f]" : "bg-[#0078d4]")}>
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1">
+              <ShieldAlert className="size-3.5" />
+              NightShift {live ? `· ${PHASE_META[incident.phase].label}` : state?.running ? "· watching" : "· idle"}
             </span>
-            {incident?.injection?.file === selected && live && <Badge variant="destructive">bug injected here</Badge>}
-          </header>
-          <div className="min-h-0 flex-1">
-            {selected === null ? (
-              <p className="p-6 text-sm text-zinc-500">Upload a project to see its code here.</p>
-            ) : (
-              <Suspense fallback={<Skeleton className="m-4 h-40" />}>
-                {content === null ? <Skeleton className="m-4 h-40" /> : <CodeEditor path={`app/${selected}`} content={content} />}
-              </Suspense>
+            <button onClick={() => { setPanel("terminal"); setPanelOpen(true); }} className="hover:bg-white/15 px-1">
+              {state?.running ? `● app up :${4501} via :${state.proxyPort}` : "○ app stopped"}
+            </button>
+            {health && state?.running && (
+              <span>
+                {percent(health.errorRate)} errors · p95 {health.p95Ms} ms
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {notice && <span className="truncate">{notice}</span>}
+            {activeTab && (
+              <>
+                <span>
+                  Ln {cursor.line}, Col {cursor.column}
+                </span>
+                <span>Spaces: 2</span>
+                <span>UTF-8</span>
+                <span className="capitalize">{languageOf(activeTab.path)}</span>
+              </>
             )}
           </div>
         </div>
+      </div>
 
-        <div
-          className="flex min-h-0 flex-[2] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0d0d10]"
-          onClick={() => inputRef.current?.focus()}
-        >
-          <header className="flex items-center gap-2 border-b border-white/10 px-3 py-1.5 text-xs text-zinc-300">
-            <SquareTerminal className="size-3.5 text-emerald-400" />
-            Terminal
-            <span className="text-zinc-500">· runs in your app folder (type help)</span>
-          </header>
-          <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono text-[12.5px] leading-relaxed">
-            {lines.length === 0 && <p className="text-zinc-500">Upload a project, then try npm start.</p>}
-            {lines.map((entry) => (
-              <div key={entry.id} className="flex gap-2 whitespace-pre-wrap break-words">
-                <span className="shrink-0 text-zinc-600">{entry.at.slice(11, 19)}</span>
-                <span className={cn("shrink-0", TAG_COLOR[entry.tag] ?? "text-zinc-400")}>{entry.tag === "$" ? "$" : `[${entry.tag}]`}</span>
-                <span className={TONE_COLOR[entry.tone]}>{entry.text}</span>
-              </div>
-            ))}
-          </div>
-          <div className="flex items-center gap-2 border-t border-white/10 px-3 py-2 font-mono text-[13px]">
-            <span className="text-emerald-400">app $</span>
-            <input
-              ref={inputRef}
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={onKey}
-              spellCheck={false}
-              autoComplete="off"
-              placeholder="npm start"
-              className="min-w-0 flex-1 bg-transparent text-zinc-50 outline-none placeholder:text-zinc-600"
-              aria-label="App terminal command"
-            />
-          </div>
-        </div>
-      </section>
-
-      {/* Live app + NightShift */}
-      <section className="flex min-h-0 flex-col gap-3 overflow-y-auto">
+      {/* NightShift side panel */}
+      <section className="hidden w-[290px] shrink-0 flex-col gap-3 overflow-y-auto xl:flex">
         <div className="rounded-xl border bg-card p-3">
           <div className="mb-2 flex items-center justify-between">
             <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Your app</p>
             {state?.running ? (
-              <Badge variant={health && health.errorRate >= 0.15 ? "destructive" : "success"}>
-                <StatusDot className={health && health.errorRate >= 0.15 ? "bg-rose-500" : "bg-emerald-400"} pulse />
-                {health && health.errorRate >= 0.15 ? "Failing" : "Running"}
+              <Badge variant={failing ? "destructive" : "success"}>
+                <StatusDot className={failing ? "bg-rose-500" : "bg-emerald-400"} pulse />
+                {failing ? "Failing" : "Running"}
               </Badge>
             ) : (
               <Badge variant="muted">Stopped</Badge>
             )}
           </div>
-          <p className="truncate font-mono text-xs text-muted-foreground">{state?.command ?? "no server command yet"}</p>
+          <p className="truncate font-mono text-xs text-muted-foreground">{state?.command ?? "start it from the terminal: npm start"}</p>
           <dl className="mt-3 grid grid-cols-3 gap-2 text-center">
             {[
               ["req / 4s", health ? String(health.requests) : "-"],
@@ -353,9 +832,19 @@ export function AppWorkspace() {
                 Stop
               </Button>
             ) : (
-              <Button size="sm" variant="outline" className="flex-1" disabled={empty || files === null} onClick={() => void run("npm start")}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="flex-1"
+                disabled={empty || entries === null}
+                onClick={() => {
+                  setPanel("terminal");
+                  setPanelOpen(true);
+                  void api.app.exec(state?.command ?? "npm start");
+                }}
+              >
                 <Play />
-                npm start
+                {state?.command ?? "npm start"}
               </Button>
             )}
             <Button size="sm" className="flex-1" disabled={!state?.running || injecting || Boolean(live)} onClick={() => void inject()}>
@@ -376,7 +865,7 @@ export function AppWorkspace() {
           {!incident ? (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
               <StatusDot className="bg-emerald-400" pulse />
-              {state?.running ? "On watch." : "Waiting for your app to start."}
+              {state?.running ? (state.hasSnapshot ? "On watch. Last known good code saved." : "On watch.") : "Waiting for your app to start."}
             </p>
           ) : (
             <div className="space-y-2.5 text-sm">
@@ -426,6 +915,100 @@ export function AppWorkspace() {
           )}
         </div>
       </section>
+
+      {/* Context menu */}
+      {menu && (
+        <div
+          className="fixed z-50 min-w-[200px] rounded-md border border-[#454545] bg-[#252526] py-1 text-[13px] text-[#cccccc] shadow-2xl"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {[
+            { label: "New File...", icon: FilePlus2, run: () => startCreate("file", menu.node), show: true },
+            { label: "New Folder...", icon: FolderPlus, run: () => startCreate("folder", menu.node), show: true },
+            { label: "Open", icon: FileCode2, run: () => menu.node && void openFile(menu.node.path), show: Boolean(menu.node && !menu.node.dir) },
+            {
+              label: "Copy Relative Path",
+              icon: Copy,
+              run: () => menu.node && void navigator.clipboard?.writeText(menu.node.path),
+              show: Boolean(menu.node),
+            },
+            {
+              label: "Rename...",
+              icon: Pencil,
+              run: () => menu.node && setPending({ kind: "rename", parent: parentOf(menu.node.path), path: menu.node.path, value: menu.node.name }),
+              show: Boolean(menu.node),
+            },
+            { label: "Delete", icon: Trash2, run: () => menu.node && void remove(menu.node), show: Boolean(menu.node) },
+          ]
+            .filter((item) => item.show)
+            .map((item) => (
+              <button
+                key={item.label}
+                onClick={() => {
+                  setMenu(null);
+                  item.run();
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-[#04395e]"
+              >
+                <item.icon className="size-3.5 text-zinc-400" />
+                {item.label}
+              </button>
+            ))}
+        </div>
+      )}
+
+      {/* Quick open (Ctrl+P) */}
+      {quickOpen && (
+        <div className="fixed inset-0 z-50" onClick={() => setQuickOpen(false)}>
+          <div
+            className="mx-auto mt-24 w-[560px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-md border border-[#454545] bg-[#252526] shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <input
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setQuickOpen(false);
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setPick((index) => Math.min(index + 1, matches.length - 1));
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setPick((index) => Math.max(index - 1, 0));
+                }
+                if (event.key === "Enter" && matches[pick]) {
+                  void openFile(matches[pick].path);
+                  setQuickOpen(false);
+                }
+              }}
+              placeholder="Search files by name"
+              className="w-full border-b border-[#454545] bg-[#3c3c3c] px-3 py-2 text-[13px] text-white outline-none placeholder:text-zinc-500"
+            />
+            <ul className="max-h-80 overflow-y-auto py-1">
+              {matches.length === 0 && <li className="px-3 py-2 text-[13px] text-zinc-500">No matching files</li>}
+              {matches.map((file, index) => (
+                <li key={file.path}>
+                  <button
+                    onMouseEnter={() => setPick(index)}
+                    onClick={() => {
+                      void openFile(file.path);
+                      setQuickOpen(false);
+                    }}
+                    className={cn("flex w-full items-center gap-2 px-3 py-1 text-left text-[13px]", index === pick ? "bg-[#04395e] text-white" : "text-[#cccccc]")}
+                  >
+                    <FileIcon path={file.path} className="size-3.5 shrink-0" />
+                    {nameOf(file.path)}
+                    <span className="truncate text-xs text-zinc-500">{parentOf(file.path)}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

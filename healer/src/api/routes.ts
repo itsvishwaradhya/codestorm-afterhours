@@ -19,10 +19,11 @@ import { healTiming } from "../report/timing.js";
 import * as repo from "../store/repository.js";
 import type { LogLine } from "../supervisor/supervisor.js";
 import type { AppHealer } from "../app/healer.js";
-import { listFiles, readAppFile, resetApp, writeAppFile } from "../app/files.js";
+import { deleteAppPath, listTree, makeAppDir, readAppFile, renameAppPath, resetApp, writeAppFile } from "../app/files.js";
 import {
   appExecSchema,
   appFileSchema,
+  appRenameSchema,
   approvalSchema,
   captureSchema,
   chaosSchema,
@@ -120,7 +121,7 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
   app.post(
     "/api/app/reset",
     wrap(async (_req, res) => {
-      await ctx.app.stopApp();
+      await ctx.app.beforeReset();
       await resetApp();
       res.json({ ok: true });
     }),
@@ -142,14 +143,14 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
     "/api/app/uploaded",
     wrap(async (_req, res) => {
       await ctx.app.uploaded();
-      res.json(await listFiles());
+      res.json(await listTree());
     }),
   );
 
   app.get(
     "/api/app/tree",
     wrap(async (_req, res) => {
-      res.json(await listFiles());
+      res.json(await listTree());
     }),
   );
 
@@ -174,8 +175,32 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
         res.status(400).json({ error: "command required" });
         return;
       }
-      await ctx.app.exec(parsed.data.command);
+      ctx.app.run(parsed.data.command);
       res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/app/mkdir",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.body);
+      res.status(parsed.success && (await makeAppDir(parsed.data.path)) ? 200 : 400).json(await listTree());
+    }),
+  );
+
+  app.post(
+    "/api/app/delete",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.body);
+      res.status(parsed.success && (await deleteAppPath(parsed.data.path)) ? 200 : 400).json(await listTree());
+    }),
+  );
+
+  app.post(
+    "/api/app/rename",
+    wrap(async (req, res) => {
+      const parsed = appRenameSchema.safeParse(req.body);
+      res.status(parsed.success && (await renameAppPath(parsed.data.from, parsed.data.to)) ? 200 : 400).json(await listTree());
     }),
   );
 

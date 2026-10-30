@@ -1,5 +1,5 @@
 import http from "node:http";
-import { APP_PORT } from "./runner.js";
+import { APP_PORT } from "./terminal.js";
 
 export const PROXY_PORT = 4500;
 const MAX_CAPTURES = 30;
@@ -100,6 +100,10 @@ export class AppTraffic {
   private index = 0;
 
   constructor(private readonly routes: () => string[]) {}
+
+  get running(): boolean {
+    return this.timer !== null;
+  }
 
   start(perSecond = 3): void {
     if (this.timer) return;

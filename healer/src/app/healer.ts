@@ -18,7 +18,8 @@ import {
 } from "./files.js";
 import { injectBug, type Injection } from "./inject.js";
 import { AppTraffic, MeasuringProxy, discoverRoutes, summarize, type Sample, type WindowStats } from "./proxy.js";
-import { AppRunner, isServerCommand, waitForPort, type AppLog } from "./runner.js";
+import { AppRunner, isPortOpen, waitForPort, type AppLog } from "./runner.js";
+import { APP_PORT, AppTerminal } from "./terminal.js";
 
 type AuditInput = Omit<AuditEntry, "id" | "at">;
 
@@ -50,6 +51,8 @@ export interface AppIncident {
 const TICK_MS = 2000;
 const WINDOW_MS = 4000;
 const STARTUP_GRACE_MS = 6000;
+// How long the app must serve cleanly after a start before its code becomes "last known good".
+const GOOD_AFTER_MS = 10_000;
 const WATCH_MS = 20_000;
 const PASS_ERROR_RATE = 0.05;
 // One broken route out of six still crosses this line.
@@ -65,6 +68,7 @@ export interface AppHealerDeps {
 // NightShift for an uploaded Express app: measure through the proxy, detect, prove a fix on a
 // shadow copy with replayed traffic, promote it, watch production, then write a receipt.
 export class AppHealer {
+  readonly terminal: AppTerminal;
   readonly runner: AppRunner;
   readonly proxy = new MeasuringProxy();
   private readonly traffic: AppTraffic;
@@ -73,16 +77,24 @@ export class AppHealer {
   private badStreak = 0;
   private graceUntil = 0;
   private busy = false;
+  private ticking = false;
+  private wasUp = false;
+  private upSince = 0;
+  private savedGood = false;
+  private expectDown = false;
+  private waitingForRecovery = false;
   private lastInjection: Injection | null = null;
   incident: AppIncident | null = null;
 
   constructor(private readonly deps: AppHealerDeps) {
-    this.runner = new AppRunner((entry) => this.publishLog(entry));
+    this.terminal = new AppTerminal((data) => deps.publish("pty-data", data));
+    this.runner = new AppRunner(this.terminal, (entry) => this.publishLog(entry));
     this.traffic = new AppTraffic(() => this.routes);
   }
 
   start(): void {
     this.proxy.start();
+    this.terminal.start();
     this.timer = setInterval(() => void this.tick(), TICK_MS);
   }
 
@@ -91,6 +103,7 @@ export class AppHealer {
     this.traffic.stop();
     this.proxy.stop();
     void this.runner.stop();
+    this.terminal.kill();
   }
 
   private publishLog(entry: AppLog): void {
@@ -120,32 +133,66 @@ export class AppHealer {
       routes: this.routes,
       health: this.proxy.window(WINDOW_MS),
       incident: this.incident,
-      hasSnapshot: this.lastInjection !== null,
+      hasSnapshot: this.savedGood || this.lastInjection !== null,
     };
   }
 
+  // The shell's working folder is about to be deleted; Windows refuses while a process sits in it.
+  async beforeReset(): Promise<void> {
+    await this.stopApp();
+    this.terminal.kill();
+  }
+
   async uploaded(): Promise<void> {
-    await this.runner.stop();
-    this.traffic.stop();
     this.proxy.clear();
     this.incident = null;
     this.lastInjection = null;
+    this.savedGood = false;
+    this.terminal.restart();
     await this.refreshRoutes();
     this.emit();
   }
 
-  async exec(command: string): Promise<void> {
-    await this.runner.exec(command);
-    if (!isServerCommand(command)) return;
-    await this.refreshRoutes();
-    this.graceUntil = Date.now() + STARTUP_GRACE_MS;
-    this.traffic.start();
-    this.say(`NightShift is watching ${this.routes.join(", ")} through the proxy on :4500`);
+  // Types a command into the shared terminal, exactly as if the user had.
+  run(command: string): void {
+    this.terminal.run(command);
   }
 
   async stopApp(): Promise<void> {
+    this.expectDown = true;
     this.traffic.stop();
     await this.runner.stop();
+  }
+
+  private async restartApp(): Promise<void> {
+    this.expectDown = true;
+    this.graceUntil = Date.now() + STARTUP_GRACE_MS;
+    await this.runner.restart();
+  }
+
+  private async appStarted(): Promise<void> {
+    this.expectDown = false;
+    if (!this.busy) this.waitingForRecovery = false;
+    this.upSince = Date.now();
+    this.savedGood = false;
+    this.graceUntil = Date.now() + STARTUP_GRACE_MS;
+    await this.refreshRoutes();
+    this.traffic.start();
+    this.say(`app is up on :${APP_PORT}; NightShift is watching ${this.routes.join(", ")} through the proxy on :4500`, "stdout");
+  }
+
+  private appStopped(): void {
+    const intended = this.expectDown || Date.now() - this.terminal.lastInterruptAt < 8000;
+    if (intended) {
+      // A deliberate stop (Ctrl+C, Stop, a NightShift restart) is not an outage: forget the
+      // last few samples so they cannot open an incident.
+      this.proxy.clear();
+      this.badStreak = 0;
+      if (!this.busy) this.traffic.stop();
+      this.say("app stopped");
+    } else {
+      this.say("app went down without being stopped", "stderr");
+    }
   }
 
   async inject(): Promise<Injection | null> {
@@ -153,7 +200,7 @@ export class AppHealer {
       this.say("start the app first (for example: npm start)", "stderr");
       return null;
     }
-    if (this.incident && !this.isClosed(this.incident)) {
+    if (this.busy || (this.incident && !this.isClosed(this.incident))) {
       this.say("an incident is already open", "stderr");
       return null;
     }
@@ -171,8 +218,7 @@ export class AppHealer {
       incidentId: null,
       details: { file: injection.file },
     });
-    this.graceUntil = Date.now() + STARTUP_GRACE_MS;
-    await this.runner.restart();
+    await this.restartApp();
     return injection;
   }
 
@@ -181,8 +227,48 @@ export class AppHealer {
   }
 
   private async tick(): Promise<void> {
-    if (this.busy || !this.runner.status().command || Date.now() < this.graceUntil) return;
-    if (this.incident && !this.isClosed(this.incident)) return;
+    if (this.ticking) return;
+    this.ticking = true;
+    try {
+      await this.observe();
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  private async observe(): Promise<void> {
+    const up = await isPortOpen(APP_PORT);
+    this.runner.running = up;
+    if (up && !this.wasUp) await this.appStarted();
+    if (!up && this.wasUp) this.appStopped();
+    this.wasUp = up;
+    if (this.busy) return;
+
+    const open = this.incident !== null && !this.isClosed(this.incident);
+    if (up && !open && !this.savedGood && Date.now() - this.upSince >= GOOD_AFTER_MS) {
+      const recent = this.proxy.window(GOOD_AFTER_MS - 2000);
+      if (recent.requests >= 5 && recent.errorRate < 0.02) {
+        try {
+          await snapshotGood();
+          this.savedGood = true;
+          this.say("app served cleanly for 10 s; this code is now the last known good version");
+        } catch (error) {
+          this.say(`could not save the last known good version: ${error instanceof Error ? error.message : String(error)}`, "stderr");
+        }
+      }
+    }
+
+    if (open || Date.now() < this.graceUntil) return;
+    if (!up && !this.traffic.running) return;
+    if (this.waitingForRecovery) {
+      // After an escalation, stay quiet until the app is healthy again or is restarted.
+      const now = this.proxy.window(WINDOW_MS);
+      if (now.requests >= 3 && now.errorRate <= PASS_ERROR_RATE && now.reachable) {
+        this.waitingForRecovery = false;
+        this.say("app is healthy again; NightShift is back on watch", "stdout");
+      }
+      return;
+    }
     const stats = this.proxy.window(WINDOW_MS);
     const bad = (stats.requests >= 3 && stats.errorRate >= BAD_ERROR_RATE) || (stats.requests > 0 && !stats.reachable);
     this.badStreak = bad ? this.badStreak + 1 : 0;
@@ -298,6 +384,7 @@ export class AppHealer {
       this.incident.outcome = "escalated: no candidate fix passed the shadow test";
       this.incident.closedAt = new Date().toISOString();
       await this.phase("escalated", "no fix passed its shadow test, a human is needed", "app.escalated");
+      this.waitingForRecovery = true;
       this.incident.receipt = this.receipt();
       this.emit();
       return;
@@ -305,9 +392,8 @@ export class AppHealer {
 
     await this.phase("promoting", `applying ${chosen.label} to production`, "app.action.applied");
     if (chosen.id === "rollback") await restoreGood();
-    this.graceUntil = Date.now() + STARTUP_GRACE_MS;
-    await this.runner.restart();
-    await waitForPort(4501, 15_000);
+    await this.restartApp();
+    await waitForPort(APP_PORT, 20_000);
     const liveAt = Date.now();
     await this.phase("watching", `fix live, watching production for ${WATCH_MS / 1000}s`, "app.watching");
 
@@ -322,6 +408,7 @@ export class AppHealer {
     } else {
       this.incident.outcome = `escalated: errors returned after ${chosen.label}`;
       await this.phase("escalated", this.incident.outcome, "app.escalated");
+      this.waitingForRecovery = true;
     }
     this.incident.receipt = this.receipt(liveAt);
     this.say("Heal Receipt written");

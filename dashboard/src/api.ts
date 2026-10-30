@@ -21,6 +21,7 @@ export interface LogLine {
 export interface WorkspaceFile {
   path: string;
   size: number;
+  dir?: boolean;
 }
 
 export interface AppLog {
@@ -165,6 +166,10 @@ export const api = {
     tree: () => request<WorkspaceFile[]>("GET", "/api/app/tree"),
     file: (path: string) => request<{ path: string; content: string }>("GET", `/api/app/file?path=${encodeURIComponent(path)}`),
     exec: (command: string) => request("POST", "/api/app/exec", { command }),
+    save: (path: string, content: string) => request("POST", "/api/app/files", { path, content }),
+    mkdir: (path: string) => request<WorkspaceFile[]>("POST", "/api/app/mkdir", { path }),
+    remove: (path: string) => request<WorkspaceFile[]>("POST", "/api/app/delete", { path }),
+    rename: (from: string, to: string) => request<WorkspaceFile[]>("POST", "/api/app/rename", { from, to }),
     stop: () => request("POST", "/api/app/stop"),
     inject: () => request<{ file: string; description: string; injectedBy: string } | null>("POST", "/api/app/inject"),
     state: () => request<AppState>("GET", "/api/app/state"),
