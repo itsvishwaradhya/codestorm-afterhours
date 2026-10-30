@@ -34,3 +34,65 @@ export interface ServiceStatus {
   healthy: boolean;
   metrics: ServiceMetrics;
 }
+
+export interface ServiceRecord {
+  name: ServiceName;
+  port: number;
+  dependencies: ServiceName[];
+  allowedFixTypes: string[];
+}
+
+export const ANOMALY_KINDS = ["unreachable", "unhealthy", "error_rate", "latency", "memory"] as const;
+export type AnomalyKind = (typeof ANOMALY_KINDS)[number];
+
+export interface Anomaly {
+  service: ServiceName;
+  kind: AnomalyKind;
+  value: number;
+  threshold: number;
+  since: string;
+}
+
+export interface Snapshot {
+  service: ServiceName;
+  at: string;
+  reachable: boolean;
+  healthy: boolean;
+  errorRate: number;
+  p95LatencyMs: number;
+  memoryMb: number;
+  requests: number;
+  activeFault: FaultType | null;
+  configMode: "ok" | "corrupt" | "unknown";
+}
+
+export type IncidentState = "detected" | "diagnosed" | "closed";
+
+export interface RankedCause {
+  service: ServiceName;
+  explainedBy: ServiceName | null;
+  reason: string;
+}
+
+export interface Incident {
+  id: string;
+  state: IncidentState;
+  rootCause: ServiceName | null;
+  symptoms: ServiceName[];
+  causes: RankedCause[];
+  anomalies: Anomaly[];
+  stateHistory: { state: IncidentState; at: string }[];
+  openedAt: string;
+  closedAt: string | null;
+  outcome: string | null;
+}
+
+export interface AuditEntry {
+  id: string;
+  at: string;
+  actor: string;
+  action: string;
+  trigger: string;
+  incidentId: string | null;
+  details: Record<string, unknown>;
+}

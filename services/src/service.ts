@@ -4,6 +4,8 @@ import {
   FAULT_TYPES,
   SERVICE_NAMES,
   SERVICE_PORTS,
+  maskDeep,
+  maskHeaders,
   type FaultType,
   type ServiceName,
   type ServiceStatus,
@@ -14,7 +16,8 @@ if (!name || !(SERVICE_NAMES as readonly string[]).includes(name)) {
   throw new Error(`SERVICE_NAME must be one of: ${SERVICE_NAMES.join(", ")}`);
 }
 const service = name as ServiceName;
-const port = SERVICE_PORTS[service];
+const port = Number(process.env.PORT ?? SERVICE_PORTS[service]);
+const HEALER_URL = process.env.HEALER_URL ?? "http://localhost:4000";
 
 const SLOW_MS = 2000;
 const DOWNSTREAM_TIMEOUT_MS = 3000;
@@ -78,6 +81,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function captureRequest(req: express.Request): void {
+  const record = {
+    service,
+    at: new Date().toISOString(),
+    method: req.method,
+    path: req.path,
+    headers: maskHeaders(req.headers as Record<string, unknown>),
+    body: maskDeep(req.body ?? {}),
+  };
+  fetch(`${HEALER_URL}/api/capture`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(record),
+    signal: AbortSignal.timeout(500),
+  }).catch(() => undefined);
+}
+
 async function callDownstream(target: ServiceName, path: string, payload: unknown): Promise<unknown> {
   const response = await fetch(`http://localhost:${SERVICE_PORTS[target]}${path}`, {
     method: "POST",
@@ -91,7 +111,12 @@ async function callDownstream(target: ServiceName, path: string, payload: unknow
   return response.json();
 }
 
-async function handleBusinessRequest(res: express.Response, work: () => Promise<unknown>): Promise<void> {
+async function handleBusinessRequest(
+  req: express.Request,
+  res: express.Response,
+  work: () => Promise<unknown>,
+): Promise<void> {
+  captureRequest(req);
   const started = Date.now();
   if (activeFault === "slow") {
     await sleep(SLOW_MS);
@@ -180,7 +205,7 @@ if (service === "orders") {
       res.status(400).json({ error: "item, quantity and cardNumber are required" });
       return;
     }
-    void handleBusinessRequest(res, async () => {
+    void handleBusinessRequest(req, res, async () => {
       const charge = await callDownstream("payments", "/charge", {
         amount: quantity * UNIT_PRICE,
         cardNumber,
@@ -193,7 +218,7 @@ if (service === "orders") {
 
 if (service === "payments") {
   app.post("/charge", (req, res) => {
-    void handleBusinessRequest(res, async () => ({
+    void handleBusinessRequest(req, res, async () => ({
       chargeId: randomUUID(),
       amount: req.body?.amount ?? 0,
       status: "captured",
@@ -203,7 +228,7 @@ if (service === "payments") {
 
 if (service === "inventory") {
   app.post("/reserve", (req, res) => {
-    void handleBusinessRequest(res, async () => ({
+    void handleBusinessRequest(req, res, async () => ({
       reservationId: randomUUID(),
       item: req.body?.item ?? null,
       quantity: req.body?.quantity ?? 0,

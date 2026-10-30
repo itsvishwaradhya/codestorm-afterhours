@@ -1,0 +1,82 @@
+import type { Db } from "mongodb";
+import type {
+  AuditEntry,
+  Incident,
+  ServiceName,
+  ServiceRecord,
+  Snapshot,
+} from "@nightshift/shared";
+
+const hideMongoId = { projection: { _id: 0 } };
+
+export interface CaptureRecord {
+  service: ServiceName;
+  at: string;
+  method: string;
+  path: string;
+  headers: Record<string, unknown>;
+  body: unknown;
+}
+
+export async function seedServices(db: Db, seeds: ServiceRecord[]): Promise<void> {
+  const services = db.collection("services");
+  for (const seed of seeds) {
+    await services.updateOne({ name: seed.name }, { $setOnInsert: seed }, { upsert: true });
+  }
+}
+
+export async function listServices(db: Db): Promise<ServiceRecord[]> {
+  const docs = await db.collection("services").find({}, hideMongoId).sort({ name: 1 }).toArray();
+  return docs as unknown as ServiceRecord[];
+}
+
+export async function updateServiceConfig(
+  db: Db,
+  name: ServiceName,
+  patch: { dependencies?: ServiceName[]; allowedFixTypes?: string[] },
+): Promise<void> {
+  const $set = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
+  if (Object.keys($set).length === 0) return;
+  await db.collection("services").updateOne({ name }, { $set });
+}
+
+export async function insertSnapshot(db: Db, snapshot: Snapshot): Promise<void> {
+  await db.collection("snapshots").insertOne({ ...snapshot, at: new Date(snapshot.at) });
+}
+
+export async function insertCapture(db: Db, record: CaptureRecord): Promise<void> {
+  await db.collection("capturedRequests").insertOne({ ...record, at: new Date(record.at) });
+}
+
+export async function listCaptures(db: Db, service: ServiceName, limit: number): Promise<CaptureRecord[]> {
+  const docs = await db
+    .collection("capturedRequests")
+    .find({ service }, hideMongoId)
+    .sort({ $natural: -1 })
+    .limit(limit)
+    .toArray();
+  return docs as unknown as CaptureRecord[];
+}
+
+export async function insertAudit(db: Db, entry: AuditEntry): Promise<void> {
+  await db.collection("auditLog").insertOne(entry);
+}
+
+export async function listAudit(db: Db, limit: number): Promise<AuditEntry[]> {
+  const docs = await db.collection("auditLog").find({}, hideMongoId).sort({ at: -1 }).limit(limit).toArray();
+  return docs as unknown as AuditEntry[];
+}
+
+export async function saveIncident(db: Db, incident: Incident): Promise<void> {
+  await db.collection("incidents").updateOne({ id: incident.id }, { $set: incident }, { upsert: true });
+}
+
+export async function listIncidents(db: Db, limit: number): Promise<Incident[]> {
+  const docs = await db.collection("incidents").find({}, hideMongoId).sort({ openedAt: -1 }).limit(limit).toArray();
+  return docs as unknown as Incident[];
+}
+
+export async function getIncident(db: Db, id: string): Promise<Incident | null> {
+  const doc = await db.collection("incidents").findOne({ id }, hideMongoId);
+  return (doc as unknown as Incident | null) ?? null;
+}

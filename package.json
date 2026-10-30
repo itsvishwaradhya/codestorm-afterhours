@@ -8,11 +8,14 @@
   },
   "workspaces": [
     "shared",
-    "services"
+    "services",
+    "healer"
   ],
   "scripts": {
+    "healer": "npm run start --workspace @nightshift/healer",
     "services": "tsx services/src/start-all.ts",
     "traffic": "tsx services/src/traffic.ts",
+    "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {
