@@ -166,6 +166,24 @@ async function waitForIncident(startedAt: number, scenario: Scenario): Promise<I
   throw new Error("incident did not reach a terminal state in time");
 }
 
+interface Timing {
+  detectSeconds: number;
+  fixLiveSeconds: number | null;
+  confirmedSeconds: number | null;
+  humanWaitSeconds: number;
+}
+
+type IncidentDetail = Incident & { attempts: AttemptInfo[]; timing?: Timing };
+
+function describeTiming(timing: Timing | undefined): string {
+  if (!timing) return "timing unavailable";
+  const human = timing.humanWaitSeconds > 0 ? `, ${timing.humanWaitSeconds}s waiting for approval` : ", no human paged";
+  const fixLive = timing.fixLiveSeconds !== null ? `fix live ${timing.fixLiveSeconds}s, ` : "no fix applied, ";
+  const confirmed = timing.confirmedSeconds !== null ? `closed ${timing.confirmedSeconds}s` : "still open";
+  const head = timing.fixLiveSeconds !== null ? `healed in ${timing.fixLiveSeconds}s` : "not healed automatically";
+  return `${head} (detect ${timing.detectSeconds}s, ${fixLive}${confirmed}${timing.fixLiveSeconds !== null ? human : ""})`;
+}
+
 function describeAttempt(attempt: AttemptInfo): string {
   const impact = attempt.impact ? `, impact ${attempt.impact}: ${(attempt.impactReasons ?? []).join("; ")}` : "";
   return `${attempt.label} -> ${attempt.verdict} (${attempt.status}, ${attempt.sampleSize} samples)${impact}`;
@@ -205,13 +223,14 @@ async function runFlap(): Promise<void> {
   }
 
   const details = await Promise.all(
-    incidents.map(async (incident) => (await call<Incident & { attempts: AttemptInfo[] }>("GET", `/api/incidents/${incident.id}`)).data),
+    incidents.map(async (incident) => (await call<IncidentDetail>("GET", `/api/incidents/${incident.id}`)).data),
   );
   const restarts = details.flatMap((detail) =>
     detail.attempts.filter((attempt) => attempt.candidate === "restart" && ["kept", "rolled_back"].includes(attempt.status)),
   );
   for (const detail of details) {
     for (const attempt of detail.attempts) console.log(`  ${detail.id.slice(0, 8)} attempt: ${describeAttempt(attempt)}`);
+    console.log(`  ${detail.id.slice(0, 8)} ${describeTiming(detail.timing)}`);
   }
   const { data: audit } = await call<{ action: string; trigger: string }[]>("GET", "/api/audit");
   const suppressed = audit.filter((entry) => entry.action === "action.suppressed");
@@ -230,6 +249,8 @@ async function runFlap(): Promise<void> {
   if (incidents.length > 1 && !details[1]?.recurrenceOf) failures.push("the second incident was not linked as a recurrence");
 
   console.log(`  ${restarts.length} restart(s) across ${incidents.length} incident(s)`);
+  const { data: scorecard } = await call<Record<string, unknown>>("GET", "/api/scorecard");
+  console.log(`  guardrails: ${JSON.stringify(scorecard)}`);
   await resetEnvironment({ ...scenario, allowedFixTypes: undefined });
   await call("POST", `/api/guard/${service}/reset`);
   report("flap", failures);
@@ -268,7 +289,7 @@ async function main(): Promise<void> {
     failures.push(`expected root cause ${scenario.service}, got ${incident.rootCause}`);
   }
 
-  const detail = await call<Incident & { attempts: AttemptInfo[] }>("GET", `/api/incidents/${incident.id}`);
+  const detail = await call<IncidentDetail>("GET", `/api/incidents/${incident.id}`);
   for (const attempt of detail.data.attempts) {
     console.log(`  attempt: ${describeAttempt(attempt)}; ${attempt.reasons.join("; ")}`);
   }
@@ -298,6 +319,7 @@ async function main(): Promise<void> {
   }
 
   console.log(`  outcome: ${incident.outcome}`);
+  console.log(`  ${describeTiming(detail.data.timing)}`);
   if (receipt.status === 200) console.log(`  receipt (${receipt.data.wordedBy}): ${receipt.data.text.split("\n")[0]}`);
 
   await resetEnvironment({ ...scenario, allowedFixTypes: undefined });

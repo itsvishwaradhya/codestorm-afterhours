@@ -40,7 +40,30 @@ export interface HealthState {
   guard: GuardStatus[];
 }
 
-export type IncidentDetail = Incident & { attempts: Attempt[] };
+export interface HealTiming {
+  firstBadAt: string;
+  detectSeconds: number;
+  fixLiveSeconds: number | null;
+  confirmedSeconds: number | null;
+  humanWaitSeconds: number;
+  phases: { state: Incident["state"]; seconds: number }[];
+}
+
+export interface Scorecard {
+  symptomRestartsAvoided: number;
+  unprovenFixesBlocked: number;
+  riskyFixesHeld: number;
+  restartStormsStopped: number;
+  badFixesRolledBack: number;
+  timeToFix: {
+    count: number;
+    medianSeconds: number | null;
+    fastestSeconds: number | null;
+    lastSeconds: number | null;
+  };
+}
+
+export type IncidentDetail = Incident & { attempts: Attempt[]; timing: HealTiming };
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, {
@@ -60,6 +83,7 @@ export const api = {
   incident: (id: string) => request<IncidentDetail>("GET", `/api/incidents/${id}`),
   audit: () => request<AuditEntry[]>("GET", "/api/audit"),
   impact: () => request<ImpactSummary>("GET", "/api/impact"),
+  scorecard: () => request<Scorecard>("GET", "/api/scorecard"),
   resetGuard: (service: string) => request("POST", `/api/guard/${service}/reset`),
   receipt: async (incidentId: string): Promise<Receipt | null> => {
     const response = await fetch(`/api/receipts/${incidentId}`);

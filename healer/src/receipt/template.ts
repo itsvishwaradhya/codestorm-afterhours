@@ -76,6 +76,18 @@ export function draftReceipt(facts: ReceiptFacts): string {
     lines.push(`This fault came back after an earlier fix (incident ${facts.recurrenceOf.slice(0, 8)}).`);
   }
 
+  const kept = facts.candidates.some((candidate) => candidate.status === "kept");
+  if (facts.state === "resolved" && kept && facts.fixLiveSeconds !== null) {
+    lines.push(
+      `Healed in ${facts.fixLiveSeconds} s from the first bad sample: detected in ${facts.detectSeconds} s, fix live in production at ${facts.fixLiveSeconds} s, then confirmed by the production watch.`,
+    );
+    lines.push(
+      facts.humanWaitSeconds > 0
+        ? `Waited ${facts.humanWaitSeconds} s for human approval.`
+        : "No human was paged.",
+    );
+  }
+
   const duration = facts.durationSeconds !== null ? ` Duration: ${facts.durationSeconds} seconds.` : "";
   lines.push(`Outcome: ${facts.outcome ?? "open"}.${duration}`);
   return lines.join("\n");
