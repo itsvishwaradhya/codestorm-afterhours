@@ -17,7 +17,16 @@ import type { ServiceRegistry } from "../registry.js";
 import { guardrailSavings } from "../report/guardrails.js";
 import { healTiming } from "../report/timing.js";
 import * as repo from "../store/repository.js";
-import { approvalSchema, captureSchema, chaosSchema, guardResetSchema, serviceUpdateSchema } from "./schemas.js";
+import type { LogLine } from "../supervisor/supervisor.js";
+import {
+  approvalSchema,
+  captureSchema,
+  chaosSchema,
+  guardResetSchema,
+  serviceUpdateSchema,
+  workspaceFileSchema,
+} from "./schemas.js";
+import { workspaceFile, workspaceTree } from "./workspace.js";
 
 type AuditInput = Omit<AuditEntry, "id" | "at">;
 
@@ -31,6 +40,7 @@ export interface ApiContext {
   cap: ActionCap;
   guard: RemediationGuard;
   reset: () => Promise<boolean>;
+  recentLogs: () => LogLine[];
 }
 
 type Handler = (req: Request, res: Response) => Promise<void>;
@@ -98,6 +108,30 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
         repo.listAuditByAction(ctx.db, "action.suppressed", 500),
       ]);
       res.json(guardrailSavings({ incidents, attempts, suppressed }));
+    }),
+  );
+
+  app.get("/api/logs", (_req, res) => {
+    res.json(ctx.recentLogs());
+  });
+
+  app.get(
+    "/api/workspace/tree",
+    wrap(async (_req, res) => {
+      res.json(await workspaceTree());
+    }),
+  );
+
+  app.get(
+    "/api/workspace/file",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.query);
+      const content = parsed.success ? await workspaceFile(parsed.data.path).catch(() => null) : null;
+      if (!parsed.success || content === null) {
+        res.status(404).json({ error: "file not in the workspace" });
+        return;
+      }
+      res.json({ path: parsed.data.path, content });
     }),
   );
 

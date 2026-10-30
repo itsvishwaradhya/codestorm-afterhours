@@ -6,9 +6,22 @@ import type {
   Impact,
   Incident,
   Receipt,
+  ServiceName,
   ServiceRecord,
   Snapshot,
 } from "@nightshift/shared";
+
+export interface LogLine {
+  service: ServiceName;
+  stream: "stdout" | "stderr" | "supervisor";
+  line: string;
+  at: string;
+}
+
+export interface WorkspaceFile {
+  path: string;
+  size: number;
+}
 
 export interface CapStatus {
   used: number;
@@ -95,4 +108,8 @@ export const api = {
     request("POST", "/api/chaos", { service, fault, ...gray }),
   decide: (attemptId: string, decision: "approve" | "reject") =>
     request("POST", `/api/approvals/${attemptId}`, { decision }),
+  logs: () => request<LogLine[]>("GET", "/api/logs"),
+  workspaceTree: () => request<WorkspaceFile[]>("GET", "/api/workspace/tree"),
+  workspaceFile: (path: string) =>
+    request<{ path: string; content: string }>("GET", `/api/workspace/file?path=${encodeURIComponent(path)}`),
 };

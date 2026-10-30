@@ -27,6 +27,10 @@ export const guardResetSchema = z.object({
   service: z.enum(SERVICE_NAMES),
 });
 
+export const workspaceFileSchema = z.object({
+  path: z.string().min(1).max(300),
+});
+
 export const approvalSchema = z.object({
   decision: z.enum(["approve", "reject"]),
 });
