@@ -65,10 +65,26 @@ describe("incident manager", () => {
     await instance.observe(payments, at);
     expect(started).toHaveLength(1);
     await instance.observe([], at);
+    await instance.observe([], at);
+    await instance.observe([], at);
     expect(instance.current()).toBeNull();
     await instance.observe(payments, at);
     await instance.observe(payments, at);
     expect(started).toHaveLength(2);
     expect(started[1].id).not.toBe(started[0].id);
+  });
+
+  it("does not close and reopen an incident when the fault blinks off for a single tick", async () => {
+    const { instance, started } = manager();
+    const payments = [anomaly("payments", "gray")];
+    await instance.observe(payments, at);
+    await instance.observe(payments, at);
+    const first = instance.current()?.id;
+    await instance.observe([], at);
+    await instance.observe(payments, at);
+    await instance.observe([], at);
+    await instance.observe(payments, at);
+    expect(instance.current()?.id).toBe(first);
+    expect(started).toHaveLength(1);
   });
 });

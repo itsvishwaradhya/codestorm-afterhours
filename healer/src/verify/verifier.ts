@@ -108,6 +108,7 @@ export function createVerifier(deps: VerifierDeps) {
           requests: production.metrics.requests,
           errorRate: production.metrics.errorRate,
           p95LatencyMs: production.metrics.p95LatencyMs,
+          slowRate: production.metrics.slowRate,
         }
       : { requests: 0, errorRate: 1, p95LatencyMs: 0 };
 

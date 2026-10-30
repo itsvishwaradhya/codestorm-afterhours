@@ -13,8 +13,16 @@ export const SERVICE_DEPENDENCIES: Record<ServiceName, readonly ServiceName[]> =
   inventory: [],
 };
 
-export const FAULT_TYPES = ["crash", "slow", "memory_leak", "bad_config"] as const;
+export const FAULT_TYPES = ["crash", "slow", "memory_leak", "bad_config", "gray"] as const;
 export type FaultType = (typeof FAULT_TYPES)[number];
+
+export const GRAY_MODES = ["error", "slow", "mixed"] as const;
+export type GrayMode = (typeof GRAY_MODES)[number];
+
+export interface GrayFault {
+  rate: number;
+  mode: GrayMode;
+}
 
 export interface ServiceMetrics {
   windowSeconds: number;
@@ -22,6 +30,9 @@ export interface ServiceMetrics {
   errors: number;
   errorRate: number;
   p95LatencyMs: number;
+  p50LatencyMs: number;
+  p99LatencyMs: number;
+  slowRate: number;
   memoryMb: number;
 }
 
@@ -30,6 +41,7 @@ export interface ServiceStatus {
   pid: number;
   startedAt: string;
   activeFault: FaultType | null;
+  gray: GrayFault | null;
   config: { mode: "ok" | "corrupt" };
   healthy: boolean;
   metrics: ServiceMetrics;
@@ -43,7 +55,7 @@ export interface ServiceRecord {
   allowedFixTypes: string[];
 }
 
-export const ANOMALY_KINDS = ["unreachable", "unhealthy", "error_rate", "latency", "memory"] as const;
+export const ANOMALY_KINDS = ["unreachable", "unhealthy", "error_rate", "latency", "memory", "gray"] as const;
 export type AnomalyKind = (typeof ANOMALY_KINDS)[number];
 
 export interface Anomaly {
@@ -54,7 +66,7 @@ export interface Anomaly {
   since: string;
 }
 
-export type FailureType = "crash" | "slow" | "memory_leak" | "bad_config";
+export type FailureType = "crash" | "slow" | "memory_leak" | "bad_config" | "gray";
 
 export interface Snapshot {
   service: ServiceName;
@@ -63,6 +75,7 @@ export interface Snapshot {
   healthy: boolean;
   errorRate: number;
   p95LatencyMs: number;
+  slowRate: number;
   memoryMb: number;
   requests: number;
   activeFault: FaultType | null;
@@ -75,6 +88,7 @@ export type IncidentState =
   | "verifying"
   | "awaiting_approval"
   | "rate_limited"
+  | "suppressed"
   | "promoting"
   | "watching"
   | "resolved"
@@ -99,6 +113,8 @@ export interface Incident {
   openedAt: string;
   closedAt: string | null;
   outcome: string | null;
+  recurrenceOf?: string | null;
+  recurrenceCount?: number;
 }
 
 export type Risk = "low" | "medium" | "high";
@@ -107,7 +123,10 @@ export interface WindowMetrics {
   requests: number;
   errorRate: number;
   p95LatencyMs: number;
+  slowRate?: number;
 }
+
+export type Impact = "helped" | "no_effect" | "hurt" | "temporary";
 
 export type AttemptStatus =
   | "rejected"
@@ -134,6 +153,10 @@ export interface Attempt {
   status: AttemptStatus;
   startedAt: string;
   endedAt: string | null;
+  prodAfter?: WindowMetrics | null;
+  actionDowntimeMs?: number | null;
+  impact?: Impact | null;
+  impactReasons?: string[];
 }
 
 export interface Receipt {

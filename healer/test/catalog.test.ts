@@ -20,6 +20,11 @@ describe("failure classification", () => {
     expect(classifyFailure([anomaly("latency")], "ok")).toBe("slow");
   });
 
+  it("classifies a gray failure ahead of plain latency", () => {
+    expect(classifyFailure([anomaly("latency"), anomaly("gray")], "ok")).toBe("gray");
+    expect(candidatesFor("gray", ["restart"]).map((candidate) => candidate.id)).toEqual(["restart"]);
+  });
+
   it("returns null for an unknown pattern", () => {
     expect(classifyFailure([anomaly("error_rate")], "ok")).toBeNull();
   });

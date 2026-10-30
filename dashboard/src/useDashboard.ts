@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { io } from "socket.io-client";
 import type { AuditEntry, Incident, Receipt } from "@nightshift/shared";
-import { api, type HealthState, type IncidentDetail } from "./api.ts";
+import { api, type HealthState, type ImpactSummary, type IncidentDetail } from "./api.ts";
 
 const LIVE_CHANNELS = ["snapshot", "incident", "attempt", "receipt", "audit"];
 
@@ -9,13 +9,20 @@ export function useDashboard() {
   const [health, setHealth] = useState<HealthState | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [impact, setImpact] = useState<ImpactSummary | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [state, incidentList, auditList] = await Promise.all([api.state(), api.incidents(), api.audit()]);
+      const [state, incidentList, auditList, impactSummary] = await Promise.all([
+        api.state(),
+        api.incidents(),
+        api.audit(),
+        api.impact(),
+      ]);
       setHealth(state);
+      setImpact(impactSummary);
       setIncidents(incidentList);
       setAudit(auditList.slice(0, 40));
       setError(null);
@@ -48,7 +55,7 @@ export function useDashboard() {
     };
   }, [refresh]);
 
-  return { health, incidents, audit, connected, error, refresh };
+  return { health, incidents, audit, impact, connected, error, refresh };
 }
 
 export function useIncidentDetail(id: string | null, stamp: unknown) {

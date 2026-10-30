@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FAULT_TYPES, SERVICE_NAMES } from "@nightshift/shared";
+import { FAULT_TYPES, GRAY_MODES, SERVICE_NAMES } from "@nightshift/shared";
 
 export const serviceUpdateSchema = z.object({
   name: z.enum(SERVICE_NAMES),
@@ -19,6 +19,12 @@ export const captureSchema = z.object({
 export const chaosSchema = z.object({
   service: z.enum(SERVICE_NAMES),
   fault: z.enum(FAULT_TYPES).nullable(),
+  rate: z.number().gt(0).max(1).optional(),
+  mode: z.enum(GRAY_MODES).optional(),
+});
+
+export const guardResetSchema = z.object({
+  service: z.enum(SERVICE_NAMES),
 });
 
 export const approvalSchema = z.object({

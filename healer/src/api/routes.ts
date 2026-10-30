@@ -12,9 +12,10 @@ import {
 import { injectFault } from "../chaos/injector.js";
 import type { ApprovalGate } from "../remediate/approvals.js";
 import type { ActionCap } from "../remediate/cap.js";
+import type { RemediationGuard } from "../remediate/guard.js";
 import type { ServiceRegistry } from "../registry.js";
 import * as repo from "../store/repository.js";
-import { approvalSchema, captureSchema, chaosSchema, serviceUpdateSchema } from "./schemas.js";
+import { approvalSchema, captureSchema, chaosSchema, guardResetSchema, serviceUpdateSchema } from "./schemas.js";
 
 type AuditInput = Omit<AuditEntry, "id" | "at">;
 
@@ -26,6 +27,7 @@ export interface ApiContext {
   audit: (entry: AuditInput) => Promise<void>;
   approvals: ApprovalGate;
   cap: ActionCap;
+  guard: RemediationGuard;
   reset: () => Promise<boolean>;
 }
 
@@ -49,8 +51,41 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
       activeIncident: ctx.activeIncident(),
       pendingApprovals: ctx.approvals.pending(),
       cap: ctx.cap.status(),
+      guard: ctx.guard.status(),
     });
   });
+
+  app.post(
+    "/api/guard/:service/reset",
+    wrap(async (req, res) => {
+      const parsed = guardResetSchema.safeParse(req.params);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues });
+        return;
+      }
+      ctx.guard.reset(parsed.data.service);
+      await ctx.audit({
+        actor: "operator",
+        action: "guard.reset",
+        trigger: `cooldown and circuit breaker reset on ${parsed.data.service}`,
+        incidentId: null,
+        details: { service: parsed.data.service },
+      });
+      res.json({ ok: true });
+    }),
+  );
+
+  app.get(
+    "/api/impact",
+    wrap(async (_req, res) => {
+      const attempts = await repo.listActedAttempts(ctx.db, 200);
+      const counts = { helped: 0, no_effect: 0, hurt: 0, temporary: 0 };
+      for (const attempt of attempts) {
+        if (attempt.impact) counts[attempt.impact] += 1;
+      }
+      res.json({ counts, recent: attempts.slice(0, 20) });
+    }),
+  );
 
   app.get("/api/services", (_req, res) => {
     res.json(ctx.registry.list());
@@ -178,14 +213,15 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
         res.status(400).json({ error: parsed.error.issues });
         return;
       }
-      const { service, fault } = parsed.data;
-      await injectFault(ctx.registry.get(service), fault);
+      const { service, fault, rate, mode } = parsed.data;
+      await injectFault(ctx.registry.get(service), fault, { rate, mode });
+      const grayLabel = fault === "gray" ? ` (${Math.round((rate ?? 0.2) * 100)}% ${mode ?? "mixed"})` : "";
       await ctx.audit({
         actor: "chaos-button",
         action: "chaos.injected",
-        trigger: `${fault ?? "clear"} on ${service}`,
+        trigger: `${fault ?? "clear"}${grayLabel} on ${service}`,
         incidentId: null,
-        details: { service, fault },
+        details: { service, fault, rate, mode },
       });
       res.status(202).json({ service, fault });
     }),

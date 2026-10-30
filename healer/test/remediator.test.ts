@@ -9,6 +9,7 @@ import {
 } from "../src/fix/catalog.js";
 import { ApprovalGate } from "../src/remediate/approvals.js";
 import { ActionCap } from "../src/remediate/cap.js";
+import { RemediationGuard } from "../src/remediate/guard.js";
 import { Remediator, type RemediatorDeps } from "../src/remediate/remediator.js";
 import { watchService } from "../src/remediate/watch.js";
 
@@ -39,25 +40,44 @@ interface Harness {
   restored: string[];
   states: IncidentState[];
   audits: string[];
+  saved: Attempt[];
+  revised: { attemptId: string; impact: Attempt["impact"] }[];
   gate: ApprovalGate;
+  guard: RemediationGuard;
   clock: { now: number };
 }
+
+const guardOptions = {
+  cooldownBaseMs: 30_000,
+  cooldownMaxMs: 300_000,
+  backoffResetMs: 600_000,
+  recurrenceWindowMs: 300_000,
+  maxRepeats: 2,
+  breakerResetMs: 900_000,
+};
 
 function harness(options: {
   verdicts: Partial<Record<string, Verdict>>;
   watch?: "ok" | "regressed";
   approvalTimeoutMs?: number;
   cap?: ActionCap;
+  guard?: RemediationGuard;
   clock?: { now: number };
   candidates?: FixCandidate[];
+  after?: Attempt["candidateMetrics"] | null;
+  downtimeMs?: number;
+  stillFailing?: boolean;
 }): Harness {
   const applied: string[] = [];
   const restored: string[] = [];
   const states: IncidentState[] = [];
   const audits: string[] = [];
+  const saved: Attempt[] = [];
+  const revised: Harness["revised"] = [];
   const clock = options.clock ?? { now: 0 };
   const gate = new ApprovalGate(options.approvalTimeoutMs ?? 60_000);
   const cap = options.cap ?? new ActionCap(3, 600_000, () => clock.now);
+  const guard = options.guard ?? new RemediationGuard(guardOptions, () => clock.now);
 
   const deps: RemediatorDeps = {
     plan: () => ({ failure: "bad_config", candidates: options.candidates ?? [REVERT_CONFIG, APPLY_STALE_SNAPSHOT, RESET_DEFAULTS] }),
@@ -76,17 +96,28 @@ function harness(options: {
       startedAt: "2026-10-30T10:00:00.000Z",
       endedAt: "2026-10-30T10:00:01.000Z",
     }),
-    saveAttempt: async () => {},
+    saveAttempt: async (attempt) => {
+      saved.push(structuredClone(attempt));
+    },
     captureState: async () => ({ activeFault: "bad_config", configMode: "corrupt" }),
     restoreState: async (_service, state) => {
       restored.push(state.configMode);
     },
     applyToProduction: async (_incident, candidate) => {
       applied.push(candidate.id);
+      return options.downtimeMs ?? 0;
     },
     watch: async () => options.watch ?? "ok",
+    readWindow: async () =>
+      options.after === undefined ? { requests: 40, errorRate: 0, p95LatencyMs: 10, slowRate: 0 } : options.after,
+    reviseAttempt: async (attemptId, patch) => {
+      revised.push({ attemptId, impact: patch.impact });
+    },
+    stillFailing: () => options.stillFailing ?? true,
     approvals: gate,
     cap,
+    guard,
+    impactRules: { errorRateDelta: 0.02, slowRateDelta: 0.05, latencyFactor: 1.5, latencyFloorMs: 500, minRequests: 5 },
     persist: async (current) => {
       states.push(current.state);
     },
@@ -100,7 +131,7 @@ function harness(options: {
     capacityPollMs: 1000,
     capacityWaitMs: 900_000,
   };
-  return { deps, applied, restored, states, audits, gate, clock };
+  return { deps, applied, restored, states, audits, saved, revised, gate, guard, clock };
 }
 
 async function waitForPending(gate: ApprovalGate): Promise<string> {
@@ -209,6 +240,70 @@ describe("remediator", () => {
     await new Remediator(h.deps).run(current);
     expect(h.applied).toEqual(["restart"]);
     expect(current.state).toBe("resolved");
+  });
+});
+
+describe("restart storms and action impact", () => {
+  function grayHarness(extra: Partial<Parameters<typeof harness>[0]> = {}) {
+    const h = harness({ verdicts: { restart: "promote" }, candidates: [RESTART], ...extra });
+    h.deps.plan = () => ({ failure: "gray", candidates: [RESTART] });
+    return h;
+  }
+
+  const numbered = (id: string): Incident => ({ ...incident(), id });
+
+  it("records production before and after, and marks a fix that worked as helped", async () => {
+    const h = grayHarness({ downtimeMs: 1200 });
+    await new Remediator(h.deps).run(numbered("incident-1"));
+    const kept = h.saved.filter((attempt) => attempt.status === "kept").pop();
+    expect(kept?.impact).toBe("helped");
+    expect(kept?.prodAfter).toMatchObject({ errorRate: 0 });
+    expect(kept?.actionDowntimeMs).toBe(1200);
+    expect(h.audits).toContain("action.impact");
+  });
+
+  it("marks a restart that changed nothing but caused downtime as hurt", async () => {
+    const h = grayHarness({ downtimeMs: 2000, after: { requests: 40, errorRate: 0.5, p95LatencyMs: 20, slowRate: 0 } });
+    await new Remediator(h.deps).run(numbered("incident-1"));
+    expect(h.saved.pop()?.impact).toBe("hurt");
+  });
+
+  it("cools down, then opens the circuit breaker instead of restarting a fault that keeps returning", async () => {
+    const h = grayHarness();
+    const remediator = new Remediator(h.deps);
+
+    const first = numbered("incident-1");
+    await remediator.run(first);
+    expect(first.state).toBe("resolved");
+
+    h.clock.now += 20_000;
+    const second = numbered("incident-2");
+    await remediator.run(second);
+    expect(second.recurrenceOf).toBe("incident-1");
+    expect(second.stateHistory.map((entry) => entry.state)).toContain("suppressed");
+    expect(h.revised).toEqual([{ attemptId: "attempt-restart", impact: "temporary" }]);
+    expect(second.state).toBe("resolved");
+
+    h.clock.now += 20_000;
+    const third = numbered("incident-3");
+    await remediator.run(third);
+    expect(third.state).toBe("escalated");
+    expect(third.outcome).toMatch(/circuit breaker open/);
+    expect(h.applied).toEqual(["restart", "restart"]);
+    expect(h.audits.filter((action) => action === "action.suppressed").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("takes no action when the fault clears by itself during the cooldown", async () => {
+    const h = grayHarness();
+    const remediator = new Remediator(h.deps);
+    await remediator.run(numbered("incident-1"));
+    h.clock.now += 5_000;
+    h.deps.stillFailing = () => false;
+    const blip = numbered("incident-2");
+    await remediator.run(blip);
+    expect(blip.state).toBe("resolved");
+    expect(blip.outcome).toMatch(/no action was needed/);
+    expect(h.applied).toEqual(["restart"]);
   });
 });
 

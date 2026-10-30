@@ -1,6 +1,17 @@
 import type { ReactNode } from "react";
-import type { Attempt, AuditEntry, FaultType, Incident, Receipt, ServiceRecord, Snapshot } from "@nightshift/shared";
-import type { CapStatus, IncidentDetail } from "./api.ts";
+import type {
+  Attempt,
+  AuditEntry,
+  FaultType,
+  GrayFault,
+  Impact,
+  Incident,
+  Receipt,
+  ServiceRecord,
+  Snapshot,
+  WindowMetrics,
+} from "@nightshift/shared";
+import type { CapStatus, GuardStatus, ImpactSummary, IncidentDetail } from "./api.ts";
 
 type Tone = "green" | "red" | "amber" | "blue" | "slate";
 
@@ -25,6 +36,7 @@ const STATE_TONE: Record<string, Tone> = {
   escalated: "red",
   awaiting_approval: "amber",
   rate_limited: "amber",
+  suppressed: "amber",
   watching: "blue",
   promoting: "blue",
   verifying: "blue",
@@ -42,24 +54,37 @@ export function time(value: string | null | undefined): string {
 
 const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
 
-const FAULTS: { label: string; fault: FaultType | null }[] = [
+const FAULTS: { label: string; fault: FaultType | null; gray?: Partial<GrayFault> }[] = [
   { label: "Crash", fault: "crash" },
   { label: "Slow", fault: "slow" },
   { label: "Memory leak", fault: "memory_leak" },
   { label: "Bad config", fault: "bad_config" },
+  { label: "Gray 20% errors", fault: "gray", gray: { rate: 0.2, mode: "error" } },
+  { label: "Gray 20% slow", fault: "gray", gray: { rate: 0.2, mode: "slow" } },
   { label: "Clear", fault: null },
 ];
+
+// Matches the healer's gray thresholds: health passes, but users are not being served well.
+function isDegraded(snapshot: Snapshot): boolean {
+  return snapshot.reachable && snapshot.healthy && (snapshot.errorRate >= 0.05 || (snapshot.slowRate ?? 0) >= 0.05);
+}
+
+const seconds = (ms: number) => `${Math.ceil(ms / 1000)} s`;
 
 export function ServiceCard({
   service,
   snapshot,
   role,
+  guard,
   onChaos,
+  onResetGuard,
 }: {
   service: ServiceRecord;
   snapshot: Snapshot | undefined;
   role: "root" | "symptom" | null;
-  onChaos: (fault: FaultType | null) => void;
+  guard: GuardStatus | undefined;
+  onChaos: (fault: FaultType | null, gray?: Partial<GrayFault>) => void;
+  onResetGuard: () => void;
 }) {
   const health = !snapshot
     ? { label: "Waiting", tone: "slate" as Tone }
@@ -67,7 +92,9 @@ export function ServiceCard({
       ? { label: "Unreachable", tone: "red" as Tone }
       : !snapshot.healthy
         ? { label: "Unhealthy", tone: "red" as Tone }
-        : { label: "Healthy", tone: "green" as Tone };
+        : isDegraded(snapshot)
+          ? { label: "Degraded (health check OK)", tone: "amber" as Tone }
+          : { label: "Healthy", tone: "green" as Tone };
 
   const ring = role === "root" ? "ring-2 ring-rose-500/60" : role === "symptom" ? "ring-1 ring-amber-500/40" : "ring-1 ring-slate-800";
 
@@ -85,10 +112,14 @@ export function ServiceCard({
         </div>
       </div>
 
-      <dl className="mt-3 grid grid-cols-3 gap-2 text-sm">
+      <dl className="mt-3 grid grid-cols-4 gap-2 text-sm">
         <div>
           <dt className="text-xs text-slate-500">Errors</dt>
           <dd>{snapshot?.reachable ? percent(snapshot.errorRate) : "-"}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-slate-500">Slow &gt;1s</dt>
+          <dd>{snapshot?.reachable ? percent(snapshot.slowRate ?? 0) : "-"}</dd>
         </div>
         <div>
           <dt className="text-xs text-slate-500">p95</dt>
@@ -104,11 +135,29 @@ export function ServiceCard({
         <p className="mt-2 text-xs text-amber-300">Active fault: {snapshot.activeFault.replace(/_/g, " ")}</p>
       )}
 
+      {guard && guard.breaker === "open" && (
+        <div className="mt-2 rounded-md bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200 ring-1 ring-rose-500/30">
+          <p className="font-medium">Auto-healing paused for {seconds(guard.breakerRemainingMs)}</p>
+          <p className="text-rose-300/80">{guard.breakerReason}</p>
+          <button onClick={onResetGuard} className="mt-1 underline hover:text-white">
+            Reset breaker
+          </button>
+        </div>
+      )}
+      {guard && guard.breaker !== "open" && guard.cooldownRemainingMs > 0 && (
+        <p className="mt-2 text-xs text-sky-300">
+          Cooling down {seconds(guard.cooldownRemainingMs)} after {guard.recentActions} recent action(s)
+        </p>
+      )}
+      {guard?.breaker === "half_open" && (
+        <p className="mt-1 text-xs text-amber-300">Breaker half-open: one more repeat will pause auto-healing</p>
+      )}
+
       <div className="mt-3 flex flex-wrap gap-1.5">
         {FAULTS.map((entry) => (
           <button
             key={entry.label}
-            onClick={() => onChaos(entry.fault)}
+            onClick={() => onChaos(entry.fault, entry.gray)}
             className="rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700 active:bg-slate-600"
           >
             {entry.label}
@@ -174,13 +223,24 @@ export function ApprovalsPanel({
   );
 }
 
+const IMPACT_TONE: Record<Impact, Tone> = { helped: "green", no_effect: "slate", hurt: "red", temporary: "amber" };
+
+export function ImpactBadge({ impact }: { impact: Impact | null | undefined }) {
+  if (!impact) return <span className="text-slate-500">-</span>;
+  return <Badge tone={IMPACT_TONE[impact]}>{impact.replace(/_/g, " ")}</Badge>;
+}
+
+function metricsLine(metrics: WindowMetrics): string {
+  return `${percent(metrics.errorRate)} err, ${percent(metrics.slowRate ?? 0)} slow, ${Math.round(metrics.p95LatencyMs)} ms p95`;
+}
+
 export function AttemptsTable({ attempts }: { attempts: Attempt[] }) {
   if (attempts.length === 0) {
     return <p className="text-sm text-slate-400">No fix was tested for this incident.</p>;
   }
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-160 text-left text-sm">
+      <table className="w-full min-w-200 text-left text-sm">
         <thead className="text-xs uppercase text-slate-500">
           <tr>
             <th className="py-2 pr-3">Fix</th>
@@ -189,6 +249,9 @@ export function AttemptsTable({ attempts }: { attempts: Attempt[] }) {
             <th className="py-2 pr-3">Baseline</th>
             <th className="py-2 pr-3">Shadow</th>
             <th className="py-2 pr-3">Samples</th>
+            <th className="py-2 pr-3">Production after</th>
+            <th className="py-2 pr-3">Downtime</th>
+            <th className="py-2 pr-3">Impact</th>
           </tr>
         </thead>
         <tbody>
@@ -210,6 +273,13 @@ export function AttemptsTable({ attempts }: { attempts: Attempt[] }) {
                 p95
               </td>
               <td className="py-2 pr-3">{attempt.sampleSize}</td>
+              <td className="py-2 pr-3">{attempt.prodAfter ? metricsLine(attempt.prodAfter) : "-"}</td>
+              <td className="py-2 pr-3">
+                {attempt.actionDowntimeMs != null ? `${(attempt.actionDowntimeMs / 1000).toFixed(1)} s` : "-"}
+              </td>
+              <td className="py-2 pr-3">
+                <ImpactBadge impact={attempt.impact} />
+              </td>
             </tr>
           ))}
         </tbody>
@@ -218,6 +288,9 @@ export function AttemptsTable({ attempts }: { attempts: Attempt[] }) {
         {attempts.map((attempt) => (
           <li key={attempt.id}>
             {attempt.label}: {attempt.reasons.join("; ")}
+            {attempt.impactReasons && attempt.impactReasons.length > 0 && (
+              <span className="text-slate-300"> Impact: {attempt.impactReasons.join("; ")}.</span>
+            )}
           </li>
         ))}
       </ul>
@@ -229,7 +302,7 @@ export function IncidentView({ detail, receipt }: { detail: IncidentDetail | nul
   if (!detail) {
     return (
       <section className="rounded-xl bg-slate-900/70 p-4 ring-1 ring-slate-800">
-        <p className="text-sm text-slate-400">No incidents yet. Press a Crash, Slow, Memory leak or Bad config button to start one.</p>
+        <p className="text-sm text-slate-400">No incidents yet. Press a Crash, Slow, Memory leak, Bad config or Gray button to start one.</p>
       </section>
     );
   }
@@ -246,6 +319,11 @@ export function IncidentView({ detail, receipt }: { detail: IncidentDetail | nul
         <div className="flex flex-wrap gap-2">
           <StateBadge state={detail.state} />
           {detail.failure && <Badge tone="slate">{detail.failure.replace(/_/g, " ")}</Badge>}
+          {detail.recurrenceOf && (
+            <Badge tone="amber">
+              Recurrence #{(detail.recurrenceCount ?? 0) + 1} of {detail.recurrenceOf.slice(0, 8)}
+            </Badge>
+          )}
         </div>
       </header>
 
@@ -284,7 +362,7 @@ export function IncidentView({ detail, receipt }: { detail: IncidentDetail | nul
       )}
 
       <div>
-        <h3 className="mb-2 text-xs font-semibold uppercase text-slate-500">Shadow verification</h3>
+        <h3 className="mb-2 text-xs font-semibold uppercase text-slate-500">Shadow verification and production impact</h3>
         <AttemptsTable attempts={detail.attempts} />
       </div>
 
@@ -335,6 +413,32 @@ export function IncidentList({
           </li>
         ))}
       </ul>
+    </section>
+  );
+}
+
+export function HealerScorecard({ impact }: { impact: ImpactSummary | null }) {
+  const counts = impact?.counts ?? { helped: 0, no_effect: 0, hurt: 0, temporary: 0 };
+  const total = counts.helped + counts.no_effect + counts.hurt + counts.temporary;
+  const cells: Impact[] = ["helped", "temporary", "no_effect", "hurt"];
+  return (
+    <section className="rounded-xl bg-slate-900/70 p-4 ring-1 ring-slate-800">
+      <h2 className="font-semibold">Did the healer help?</h2>
+      <p className="mt-1 text-xs text-slate-400">Every automatic action, judged on production before and after it ran.</p>
+      {total === 0 ? (
+        <p className="mt-2 text-sm text-slate-400">No automatic actions yet.</p>
+      ) : (
+        <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
+          {cells.map((cell) => (
+            <div key={cell} className="flex items-center justify-between rounded-md bg-slate-950 px-2 py-1.5">
+              <dt>
+                <ImpactBadge impact={cell} />
+              </dt>
+              <dd className="font-semibold">{counts[cell]}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
     </section>
   );
 }

@@ -6,12 +6,13 @@ import type { Attempt, AuditEntry, Incident, ServiceName, Snapshot } from "@nigh
 import { registerRoutes } from "./api/routes.js";
 import { startCollector, waitForServices, type Collector } from "./collect/collector.js";
 import { config } from "./config.js";
-import { createDetector } from "./detect/detector.js";
+import { breachesOf, createDetector } from "./detect/detector.js";
 import { candidatesFor, classifyFailure, type FixCandidate } from "./fix/catalog.js";
 import {
   captureState,
   readStatus,
   readTotals,
+  readWindow,
   restoreState,
   runSteps,
   serviceUrl,
@@ -22,6 +23,7 @@ import { createGateway } from "./realtime/gateway.js";
 import { ServiceRegistry } from "./registry.js";
 import { ApprovalGate } from "./remediate/approvals.js";
 import { ActionCap } from "./remediate/cap.js";
+import { RemediationGuard } from "./remediate/guard.js";
 import { isTerminal, Remediator, type RemediationPlan } from "./remediate/remediator.js";
 import { createProviders } from "./receipt/providers.js";
 import { ReceiptWriter } from "./receipt/writer.js";
@@ -86,6 +88,7 @@ async function main(): Promise<void> {
 
   const approvals = new ApprovalGate(config.approvalTimeoutMs);
   const cap = new ActionCap(config.actionCap.max, config.actionCap.windowMs);
+  const guard = new RemediationGuard(config.guard);
   const ports = new PortPool(config.clonePorts.from, config.clonePorts.to);
   const supervisor = new Supervisor(config.healerUrl);
   process.on("exit", () => supervisor.stop());
@@ -129,19 +132,21 @@ async function main(): Promise<void> {
     return { failure, candidates };
   };
 
-  const applyToProduction = async (incident: Incident, candidate: FixCandidate): Promise<void> => {
+  const applyToProduction = async (incident: Incident, candidate: FixCandidate): Promise<number> => {
     const record = registry.get(incident.rootCause as ServiceName);
     if (!candidate.productionAllowed) {
       throw new Error(`${candidate.id} is not allowed in production`);
     }
     if (candidate.startsFresh) {
+      const started = Date.now();
       await supervisor.restart(record);
       if (!(await waitForUrl(serviceUrl(record.port), config.productionReadyTimeoutMs))) {
         throw new Error(`${record.name} did not come back after restart`);
       }
-    } else {
-      await runSteps(serviceUrl(record.port), candidate.steps);
+      return Date.now() - started;
     }
+    await runSteps(serviceUrl(record.port), candidate.steps);
+    return 0;
   };
 
   const remediator = new Remediator({
@@ -154,10 +159,12 @@ async function main(): Promise<void> {
     captureState: (service) => captureState(serviceUrl(registry.get(service).port)),
     restoreState: (service, state) => restoreState(serviceUrl(registry.get(service).port), state),
     applyToProduction,
-    watch: (service, preFixErrorRate) =>
+    watch: (service, baseline) =>
       watchService({
         readTotals: () => readTotals(serviceUrl(registry.get(service).port)),
-        preFixErrorRate,
+        preFixErrorRate: baseline.errorRate,
+        preFixSlowRate: baseline.slowRate,
+        minSlowRate: config.watch.minSlowRate,
         durationMs: config.watch.durationMs,
         intervalMs: config.watch.intervalMs,
         minRequests: config.watch.minRequests,
@@ -165,8 +172,24 @@ async function main(): Promise<void> {
         consecutive: config.watch.consecutive,
         sleep,
       }),
+    readWindow: (service) => readWindow(serviceUrl(registry.get(service).port)),
+    reviseAttempt: async (attemptId, patch) => {
+      const updated = await repo.reviseAttemptImpact(
+        store.db,
+        attemptId,
+        patch.impact ?? "temporary",
+        patch.impactReasons ?? [],
+      );
+      if (updated) gateway.publish("attempt", updated);
+    },
+    stillFailing: (service) => {
+      const snapshot = latest.get(service);
+      return !snapshot || breachesOf(snapshot, config.detector).length > 0;
+    },
     approvals,
     cap,
+    guard,
+    impactRules: config.impact,
     persist,
     audit: auditIncident,
     sleep,
@@ -199,6 +222,7 @@ async function main(): Promise<void> {
       detector.reset();
       manager.reset();
       cap.reset();
+      guard.reset();
       latest.clear();
       receipted.clear();
       await registry.reset();
@@ -229,6 +253,7 @@ async function main(): Promise<void> {
     audit,
     approvals,
     cap,
+    guard,
     reset: resetDemo,
   });
 

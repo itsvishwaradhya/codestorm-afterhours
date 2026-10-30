@@ -1,10 +1,14 @@
-import type { FaultType, ServiceRecord } from "@nightshift/shared";
+import type { FaultType, GrayFault, ServiceRecord } from "@nightshift/shared";
 
-export async function injectFault(service: ServiceRecord, fault: FaultType | null): Promise<void> {
+export async function injectFault(
+  service: ServiceRecord,
+  fault: FaultType | null,
+  gray: Partial<GrayFault> = {},
+): Promise<void> {
   const response = await fetch(`http://localhost:${service.port}/__chaos`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ fault }),
+    body: JSON.stringify({ fault, ...(fault === "gray" ? gray : {}) }),
     signal: AbortSignal.timeout(2000),
   });
   if (!response.ok) {

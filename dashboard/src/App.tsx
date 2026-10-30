@@ -1,10 +1,11 @@
 import { useState } from "react";
-import type { FaultType, ServiceName } from "@nightshift/shared";
+import type { FaultType, GrayFault, ServiceName } from "@nightshift/shared";
 import { api } from "./api.ts";
 import {
   ApprovalsPanel,
   AuditFeed,
   CapPill,
+  HealerScorecard,
   IncidentList,
   IncidentView,
   ServiceCard,
@@ -12,7 +13,7 @@ import {
 import { useDashboard, useIncidentDetail } from "./useDashboard.ts";
 
 export default function App() {
-  const { health, incidents, audit, connected, error, refresh } = useDashboard();
+  const { health, incidents, audit, impact, connected, error, refresh } = useDashboard();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -42,8 +43,8 @@ export default function App() {
     }
   };
 
-  const chaos = (service: string, fault: FaultType | null) =>
-    runAction(() => api.chaos(service, fault));
+  const chaos = (service: string, fault: FaultType | null, gray?: Partial<GrayFault>) =>
+    runAction(() => api.chaos(service, fault, gray));
 
   const decide = (attemptId: string, decision: "approve" | "reject") =>
     runAction(() => api.decide(attemptId, decision));
@@ -80,7 +81,9 @@ export default function App() {
                 service={service}
                 snapshot={health?.snapshots.find((snapshot) => snapshot.service === service.name)}
                 role={roleFor(service.name)}
-                onChaos={(fault) => void chaos(service.name, fault)}
+                guard={health?.guard?.find((entry) => entry.service === service.name)}
+                onChaos={(fault, gray) => void chaos(service.name, fault, gray)}
+                onResetGuard={() => void runAction(() => api.resetGuard(service.name))}
               />
             ))}
           </div>
@@ -91,6 +94,7 @@ export default function App() {
         </section>
 
         <aside className="space-y-4">
+          <HealerScorecard impact={impact} />
           <IncidentList incidents={incidents} selectedId={shownId} onSelect={setSelectedId} />
           <AuditFeed entries={audit} />
         </aside>

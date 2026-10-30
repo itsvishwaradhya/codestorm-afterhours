@@ -2,6 +2,8 @@ import type {
   Attempt,
   AuditEntry,
   FaultType,
+  GrayFault,
+  Impact,
   Incident,
   Receipt,
   ServiceRecord,
@@ -15,12 +17,27 @@ export interface CapStatus {
   remaining: number;
 }
 
+export interface GuardStatus {
+  service: string;
+  cooldownRemainingMs: number;
+  breaker: "closed" | "open" | "half_open";
+  breakerRemainingMs: number;
+  breakerReason: string | null;
+  recentActions: number;
+}
+
+export interface ImpactSummary {
+  counts: Record<Impact, number>;
+  recent: Attempt[];
+}
+
 export interface HealthState {
   services: ServiceRecord[];
   snapshots: Snapshot[];
   activeIncident: Incident | null;
   pendingApprovals: string[];
   cap: CapStatus;
+  guard: GuardStatus[];
 }
 
 export type IncidentDetail = Incident & { attempts: Attempt[] };
@@ -42,13 +59,16 @@ export const api = {
   incidents: () => request<Incident[]>("GET", "/api/incidents"),
   incident: (id: string) => request<IncidentDetail>("GET", `/api/incidents/${id}`),
   audit: () => request<AuditEntry[]>("GET", "/api/audit"),
+  impact: () => request<ImpactSummary>("GET", "/api/impact"),
+  resetGuard: (service: string) => request("POST", `/api/guard/${service}/reset`),
   receipt: async (incidentId: string): Promise<Receipt | null> => {
     const response = await fetch(`/api/receipts/${incidentId}`);
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`receipt request failed with ${response.status}`);
     return (await response.json()) as Receipt;
   },
-  chaos: (service: string, fault: FaultType | null) => request("POST", "/api/chaos", { service, fault }),
+  chaos: (service: string, fault: FaultType | null, gray?: Partial<GrayFault>) =>
+    request("POST", "/api/chaos", { service, fault, ...gray }),
   decide: (attemptId: string, decision: "approve" | "reject") =>
     request("POST", `/api/approvals/${attemptId}`, { decision }),
 };

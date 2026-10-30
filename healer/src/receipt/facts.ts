@@ -35,10 +35,15 @@ export const receiptFactsSchema = z.object({
       sampleSize: z.number(),
       baseline: metricsSchema,
       candidate: metricsSchema,
+      impact: z.string().nullable(),
+      impactReasons: z.array(z.string()),
+      downtimeMs: z.number().nullable(),
     }),
   ),
   before: metricsSchema.nullable(),
   after: metricsSchema.nullable(),
+  impact: z.string().nullable(),
+  recurrenceOf: z.string().nullable(),
 });
 
 export type ReceiptFacts = z.infer<typeof receiptFactsSchema>;
@@ -84,16 +89,18 @@ export function buildFacts(incident: Incident, attempts: Attempt[]): ReceiptFact
         errorRate: attempt.candidateMetrics.errorRate,
         p95LatencyMs: attempt.candidateMetrics.p95LatencyMs,
       },
+      impact: attempt.impact ?? null,
+      impactReasons: attempt.impactReasons ?? [],
+      downtimeMs: attempt.actionDowntimeMs ?? null,
     })),
     before: decisive
       ? { errorRate: decisive.baseline.errorRate, p95LatencyMs: decisive.baseline.p95LatencyMs }
       : null,
-    after:
-      decisive && decisive.status === "kept"
-        ? {
-            errorRate: decisive.candidateMetrics.errorRate,
-            p95LatencyMs: decisive.candidateMetrics.p95LatencyMs,
-          }
-        : null,
+    // Measured on production after the action, never the shadow replay.
+    after: decisive?.prodAfter
+      ? { errorRate: decisive.prodAfter.errorRate, p95LatencyMs: decisive.prodAfter.p95LatencyMs }
+      : null,
+    impact: decisive?.impact ?? null,
+    recurrenceOf: incident.recurrenceOf ?? null,
   });
 }

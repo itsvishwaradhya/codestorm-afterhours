@@ -1,10 +1,11 @@
-import type { FaultType, ServiceStatus } from "@nightshift/shared";
+import type { FaultType, GrayFault, ServiceStatus, WindowMetrics } from "@nightshift/shared";
 import type { FixStep } from "./catalog.js";
 
 const HTTP_TIMEOUT_MS = 2000;
 
 export interface ProductionState {
   activeFault: FaultType | null;
+  gray?: GrayFault | null;
   configMode: "ok" | "corrupt";
 }
 
@@ -22,11 +23,11 @@ export async function putConfig(baseUrl: string, mode: "ok" | "corrupt"): Promis
   if (!response.ok) throw new Error(`config update rejected: ${response.status}`);
 }
 
-export async function postFault(baseUrl: string, fault: FaultType | null): Promise<void> {
+export async function postFault(baseUrl: string, fault: FaultType | null, gray?: GrayFault | null): Promise<void> {
   const response = await fetch(`${baseUrl}/__chaos`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ fault }),
+    body: JSON.stringify({ fault, ...(fault === "gray" && gray ? gray : {}) }),
     signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`fault update rejected: ${response.status}`);
@@ -51,10 +52,26 @@ export async function readStatus(baseUrl: string): Promise<ServiceStatus | null>
 
 export async function readTotals(
   baseUrl: string,
-): Promise<{ requests: number; errors: number; healthy: boolean } | null> {
+): Promise<{ requests: number; errors: number; healthy: boolean; slowRate: number } | null> {
   const status = await readStatus(baseUrl);
   if (!status) return null;
-  return { requests: status.totals.requests, errors: status.totals.errors, healthy: status.healthy };
+  return {
+    requests: status.totals.requests,
+    errors: status.totals.errors,
+    healthy: status.healthy,
+    slowRate: status.metrics.slowRate,
+  };
+}
+
+export async function readWindow(baseUrl: string): Promise<WindowMetrics | null> {
+  const status = await readStatus(baseUrl);
+  if (!status) return null;
+  return {
+    requests: status.metrics.requests,
+    errorRate: status.metrics.errorRate,
+    p95LatencyMs: status.metrics.p95LatencyMs,
+    slowRate: status.metrics.slowRate,
+  };
 }
 
 export async function captureState(baseUrl: string): Promise<ProductionState | null> {
@@ -62,6 +79,7 @@ export async function captureState(baseUrl: string): Promise<ProductionState | n
   if (!status) return null;
   return {
     activeFault: status.activeFault,
+    gray: status.gray,
     configMode: status.config.mode,
   };
 }
@@ -72,13 +90,13 @@ export async function restoreState(baseUrl: string, state: ProductionState): Pro
     await putConfig(baseUrl, state.configMode);
   }
   if (current && current.activeFault !== state.activeFault && state.activeFault !== "crash") {
-    await postFault(baseUrl, state.activeFault);
+    await postFault(baseUrl, state.activeFault, state.gray);
   }
 }
 
 export async function copyProductionState(cloneUrl: string, production: ServiceStatus): Promise<void> {
   if (production.activeFault && production.activeFault !== "crash") {
-    await postFault(cloneUrl, production.activeFault);
+    await postFault(cloneUrl, production.activeFault, production.gray);
   }
   if (production.config.mode === "corrupt") {
     await putConfig(cloneUrl, "corrupt");

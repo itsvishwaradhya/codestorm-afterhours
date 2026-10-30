@@ -89,14 +89,50 @@ describe("template receipt", () => {
       status: "kept",
       startedAt: "2026-10-30T06:35:11.900Z",
       endedAt: "2026-10-30T06:35:13.000Z",
+      prodAfter: { requests: 40, errorRate: 0.025, p95LatencyMs: 9 },
+      actionDowntimeMs: 0,
+      impact: "helped",
+      impactReasons: ["error rate 6.0% -> 2.5%"],
     };
     const text = draftReceipt(buildFacts(incident(), [attempt]));
     expect(text).toContain("payments");
     expect(text).toContain("orders");
     expect(text).toContain("Revert config to last known good");
     expect(text).toContain("Before the fix: error rate 6.0%");
-    expect(text).toContain("After the fix: error rate 0.0%");
+    expect(text).toContain("After the fix (production): error rate 2.5%");
+    expect(text).toContain("Did the action help: helped");
     expect(text).toContain("Outcome: fixed by Revert config to last known good");
+  });
+
+  it("does not report shadow numbers as the production result", () => {
+    const attempt: Attempt = {
+      id: "attempt-1",
+      incidentId: "incident-1",
+      candidate: "revert_config",
+      label: "Revert config to last known good",
+      risk: "low",
+      verdict: "promote",
+      reasons: [],
+      baseline: { requests: 80, errorRate: 0.06, p95LatencyMs: 1 },
+      candidateMetrics: { requests: 86, errorRate: 0, p95LatencyMs: 12 },
+      sampleSize: 86,
+      status: "kept",
+      startedAt: "2026-10-30T06:35:11.900Z",
+      endedAt: "2026-10-30T06:35:13.000Z",
+    };
+    expect(buildFacts(incident(), [attempt]).after).toBeNull();
+  });
+
+  it("explains a gray failure and a recurrence", () => {
+    const gray: Incident = {
+      ...incident(),
+      failure: "gray",
+      anomalies: [{ service: "payments", kind: "gray", value: 0.2, threshold: 0.05, since: "2026-10-30T06:35:11.000Z" }],
+      recurrenceOf: "abcdef12-0000",
+    };
+    const text = draftReceipt(buildFacts(gray, []));
+    expect(text).toContain("payments kept passing its health check while 20.0% of requests failed or ran slow");
+    expect(text).toContain("came back after an earlier fix (incident abcdef12)");
   });
 });
 

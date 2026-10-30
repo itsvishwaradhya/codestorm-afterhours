@@ -122,6 +122,32 @@ export async function saveAttempt(db: Db, attempt: Attempt): Promise<void> {
   await db.collection("attempts").updateOne({ id: attempt.id }, { $set: attempt }, { upsert: true });
 }
 
+export async function reviseAttemptImpact(
+  db: Db,
+  id: string,
+  impact: NonNullable<Attempt["impact"]>,
+  reasons: string[],
+): Promise<Attempt | null> {
+  const doc = await db
+    .collection<Attempt>("attempts")
+    .findOneAndUpdate(
+      { id },
+      { $set: { impact }, $push: { impactReasons: { $each: reasons } } },
+      { returnDocument: "after", ...hideMongoId },
+    );
+  return (doc as unknown as Attempt | null) ?? null;
+}
+
+export async function listActedAttempts(db: Db, limit: number): Promise<Attempt[]> {
+  const docs = await db
+    .collection("attempts")
+    .find({ impact: { $type: "string" } }, hideMongoId)
+    .sort({ startedAt: -1 })
+    .limit(limit)
+    .toArray();
+  return docs as unknown as Attempt[];
+}
+
 export async function listAttempts(db: Db, incidentId: string): Promise<Attempt[]> {
   const docs = await db
     .collection("attempts")

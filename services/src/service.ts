@@ -2,11 +2,14 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import {
   FAULT_TYPES,
+  GRAY_MODES,
   SERVICE_NAMES,
   SERVICE_PORTS,
   maskDeep,
   maskHeaders,
   type FaultType,
+  type GrayFault,
+  type GrayMode,
   type ServiceName,
   type ServiceStatus,
 } from "@nightshift/shared";
@@ -21,6 +24,8 @@ const HEALER_URL = process.env.HEALER_URL ?? "http://localhost:4000";
 const IS_SHADOW = process.env.SHADOW === "1";
 
 const SLOW_MS = 2000;
+const SLOW_THRESHOLD_MS = 1000;
+const DEFAULT_GRAY: GrayFault = { rate: 0.2, mode: "mixed" };
 const DOWNSTREAM_TIMEOUT_MS = 3000;
 const LEAK_CHUNK_BYTES = 4 * 1024 * 1024;
 const LEAK_LIMIT_MB = 300;
@@ -39,6 +44,7 @@ const samples: Sample[] = [];
 const leaked: Buffer[] = [];
 const startedAt = new Date().toISOString();
 let activeFault: FaultType | null = null;
+let gray: GrayFault | null = null;
 let configMode: "ok" | "corrupt" = "ok";
 let totalRequests = 0;
 let totalErrors = 0;
@@ -63,21 +69,34 @@ function recordSample(latencyMs: number, ok: boolean): void {
   }
 }
 
+function percentile(sorted: number[], fraction: number): number {
+  return sorted.length > 0 ? sorted[Math.ceil(sorted.length * fraction) - 1] : 0;
+}
+
 function currentMetrics(): ServiceStatus["metrics"] {
   const cutoff = Date.now() - WINDOW_MS;
   const recent = samples.filter((sample) => sample.at >= cutoff);
   const errors = recent.filter((sample) => !sample.ok).length;
+  const slow = recent.filter((sample) => sample.latencyMs >= SLOW_THRESHOLD_MS).length;
   const latencies = recent.map((sample) => sample.latencyMs).sort((a, b) => a - b);
-  const p95 =
-    latencies.length > 0 ? latencies[Math.ceil(latencies.length * 0.95) - 1] : 0;
   return {
     windowSeconds: WINDOW_MS / 1000,
     requests: recent.length,
     errors,
     errorRate: recent.length > 0 ? errors / recent.length : 0,
-    p95LatencyMs: p95,
+    p95LatencyMs: percentile(latencies, 0.95),
+    p50LatencyMs: percentile(latencies, 0.5),
+    p99LatencyMs: percentile(latencies, 0.99),
+    slowRate: recent.length > 0 ? slow / recent.length : 0,
     memoryMb: Math.round(memoryMb()),
   };
+}
+
+// A gray fault hits only a fraction of requests and never touches /health.
+function grayEffect(): "error" | "slow" | null {
+  if (activeFault !== "gray" || !gray || Math.random() >= gray.rate) return null;
+  if (gray.mode === "mixed") return Math.random() < 0.5 ? "error" : "slow";
+  return gray.mode;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -125,7 +144,8 @@ async function handleBusinessRequest(
 ): Promise<void> {
   captureRequest(req);
   const started = Date.now();
-  if (activeFault === "slow") {
+  const grayHit = grayEffect();
+  if (activeFault === "slow" || grayHit === "slow") {
     await sleep(SLOW_MS);
   }
   if (activeFault === "memory_leak") {
@@ -135,6 +155,8 @@ async function handleBusinessRequest(
   let outcome: Outcome;
   if (configMode === "corrupt") {
     outcome = { status: 500, body: { error: "invalid configuration" } };
+  } else if (grayHit === "error") {
+    outcome = { status: 500, body: { error: "intermittent failure" } };
   } else if (leakExhausted()) {
     outcome = { status: 503, body: { error: "out of memory" } };
   } else {
@@ -169,6 +191,7 @@ app.get("/metrics", (_req, res) => {
     pid: process.pid,
     startedAt,
     activeFault,
+    gray: activeFault === "gray" ? gray : null,
     config: { mode: configMode },
     healthy: isHealthy(),
     metrics: currentMetrics(),
@@ -191,8 +214,19 @@ app.post("/__chaos", (req, res) => {
   if (fault === "bad_config") {
     configMode = "corrupt";
   }
+  if (fault === "gray") {
+    const rate = Number(req.body?.rate ?? DEFAULT_GRAY.rate);
+    const mode = (req.body?.mode ?? DEFAULT_GRAY.mode) as GrayMode;
+    if (!(rate > 0 && rate <= 1) || !(GRAY_MODES as readonly string[]).includes(mode)) {
+      res.status(400).json({ error: `gray needs rate in (0, 1] and mode one of: ${GRAY_MODES.join(", ")}` });
+      return;
+    }
+    gray = { rate, mode };
+  } else {
+    gray = null;
+  }
   activeFault = fault;
-  res.json({ service, activeFault });
+  res.json({ service, activeFault, gray });
 });
 
 app.get("/config", (_req, res) => {

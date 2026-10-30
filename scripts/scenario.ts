@@ -8,10 +8,13 @@ const QUIET_TIMEOUT_MS = 5 * 60_000;
 
 interface Scenario {
   service: (typeof SERVICES)[number];
-  fault: "crash" | "slow" | "memory_leak" | "bad_config";
+  fault: "crash" | "slow" | "memory_leak" | "bad_config" | "gray";
+  gray?: { rate: number; mode: "error" | "slow" | "mixed" };
   allowedFixTypes?: string[];
   expectState: "resolved" | "escalated";
   expectOutcome: RegExp;
+  expectFailure?: string;
+  expectImpact?: string;
   expectProductionCorrupt?: boolean;
   requiresApproval?: boolean;
 }
@@ -47,22 +50,49 @@ const SCENARIOS: Record<string, Scenario> = {
     expectState: "resolved",
     expectOutcome: /fixed by Reset to factory defaults/,
   },
+  gray: {
+    service: "payments",
+    fault: "gray",
+    gray: { rate: 0.2, mode: "error" },
+    expectState: "resolved",
+    expectOutcome: /fixed by Restart process/,
+    expectFailure: "gray",
+    expectImpact: "helped",
+  },
+  gray_slow: {
+    service: "inventory",
+    fault: "gray",
+    gray: { rate: 0.2, mode: "slow" },
+    expectState: "resolved",
+    expectOutcome: /fixed by Restart process/,
+    expectFailure: "gray",
+    expectImpact: "helped",
+  },
 };
+
+const FLAP_CYCLES = 4;
+const FLAP_RETURN_MS = 10_000;
 
 interface Incident {
   id: string;
   state: string;
   rootCause: string | null;
+  failure: string | null;
   outcome: string | null;
   openedAt: string;
+  recurrenceOf?: string | null;
 }
 
 interface AttemptInfo {
+  id: string;
+  candidate: string;
   label: string;
   verdict: string;
   status: string;
   sampleSize: number;
   reasons: string[];
+  impact?: string | null;
+  impactReasons?: string[];
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<{ status: number; data: T }> {
@@ -136,11 +166,81 @@ async function waitForIncident(startedAt: number, scenario: Scenario): Promise<I
   throw new Error("incident did not reach a terminal state in time");
 }
 
+function describeAttempt(attempt: AttemptInfo): string {
+  const impact = attempt.impact ? `, impact ${attempt.impact}: ${(attempt.impactReasons ?? []).join("; ")}` : "";
+  return `${attempt.label} -> ${attempt.verdict} (${attempt.status}, ${attempt.sampleSize} samples)${impact}`;
+}
+
+function report(name: string, failures: string[]): void {
+  if (failures.length > 0) {
+    console.log(`[scenario] ${name}: FAIL`);
+    for (const failure of failures) console.log(`  - ${failure}`);
+    process.exit(1);
+  }
+  console.log(`[scenario] ${name}: PASS`);
+}
+
+// A gray fault that comes back every time the healer restarts the service. A good healer
+// restarts at most twice, then opens its circuit breaker and hands the problem to a human.
+async function runFlap(): Promise<void> {
+  const service = "payments";
+  const scenario: Scenario = { service, fault: "gray", expectState: "escalated", expectOutcome: /circuit breaker/ };
+  console.log(`[scenario] flap: gray fault on ${service} that returns ${FLAP_RETURN_MS / 1000} s after every fix`);
+  await call("GET", "/health");
+  await waitForQuiet();
+  await resetEnvironment(scenario);
+  await call("POST", `/api/guard/${service}/reset`);
+  await sleep(3000);
+
+  const incidents: Incident[] = [];
+  for (let cycle = 1; cycle <= FLAP_CYCLES; cycle += 1) {
+    const startedAt = Date.now();
+    await call("POST", "/api/chaos", { service, fault: "gray", rate: 0.2, mode: "error" });
+    console.log(`  cycle ${cycle}: fault injected`);
+    const incident = await waitForIncident(startedAt, scenario);
+    incidents.push(incident);
+    console.log(`  cycle ${cycle}: ${incident.state}, ${incident.outcome}`);
+    if (incident.state === "escalated") break;
+    await sleep(FLAP_RETURN_MS);
+  }
+
+  const details = await Promise.all(
+    incidents.map(async (incident) => (await call<Incident & { attempts: AttemptInfo[] }>("GET", `/api/incidents/${incident.id}`)).data),
+  );
+  const restarts = details.flatMap((detail) =>
+    detail.attempts.filter((attempt) => attempt.candidate === "restart" && ["kept", "rolled_back"].includes(attempt.status)),
+  );
+  for (const detail of details) {
+    for (const attempt of detail.attempts) console.log(`  ${detail.id.slice(0, 8)} attempt: ${describeAttempt(attempt)}`);
+  }
+  const { data: audit } = await call<{ action: string; trigger: string }[]>("GET", "/api/audit");
+  const suppressed = audit.filter((entry) => entry.action === "action.suppressed");
+  for (const entry of suppressed) console.log(`  suppressed: ${entry.trigger}`);
+
+  const failures: string[] = [];
+  const last = incidents[incidents.length - 1];
+  if (!last || last.state !== "escalated" || !/circuit breaker/.test(last.outcome ?? "")) {
+    failures.push(`expected the last incident to escalate with the circuit breaker, got ${last?.state}: ${last?.outcome}`);
+  }
+  if (restarts.length > 2) failures.push(`healer restarted ${restarts.length} times; a restart storm`);
+  if (suppressed.length === 0) failures.push("no action.suppressed entry in the audit trail");
+  if (details[0]?.attempts.find((attempt) => attempt.status === "kept")?.impact !== "temporary") {
+    failures.push("the first fix was not revised to temporary after the fault came back");
+  }
+  if (incidents.length > 1 && !details[1]?.recurrenceOf) failures.push("the second incident was not linked as a recurrence");
+
+  console.log(`  ${restarts.length} restart(s) across ${incidents.length} incident(s)`);
+  await resetEnvironment({ ...scenario, allowedFixTypes: undefined });
+  await call("POST", `/api/guard/${service}/reset`);
+  report("flap", failures);
+}
+
 async function main(): Promise<void> {
   const name = process.argv[2];
+  if (name === "flap") return runFlap();
   const scenario = name ? SCENARIOS[name] : undefined;
   if (!scenario) {
-    console.log(`usage: npm run scenario -- <${Object.keys(SCENARIOS).join("|")}>`);
+    console.log(`usage: npm run scenario -- <${[...Object.keys(SCENARIOS), "flap"].join("|")}>`);
     process.exit(2);
   }
 
@@ -148,10 +248,11 @@ async function main(): Promise<void> {
   await call("GET", "/health");
   await waitForQuiet();
   await resetEnvironment(scenario);
+  await call("POST", `/api/guard/${scenario.service}/reset`);
   await sleep(3000);
 
   const startedAt = Date.now();
-  await call("POST", "/api/chaos", { service: scenario.service, fault: scenario.fault });
+  await call("POST", "/api/chaos", { service: scenario.service, fault: scenario.fault, ...scenario.gray });
   console.log("  fault injected");
 
   const incident = await waitForIncident(startedAt, scenario);
@@ -169,9 +270,16 @@ async function main(): Promise<void> {
 
   const detail = await call<Incident & { attempts: AttemptInfo[] }>("GET", `/api/incidents/${incident.id}`);
   for (const attempt of detail.data.attempts) {
-    console.log(
-      `  attempt: ${attempt.label} -> ${attempt.verdict} (${attempt.status}, ${attempt.sampleSize} samples); ${attempt.reasons.join("; ")}`,
-    );
+    console.log(`  attempt: ${describeAttempt(attempt)}; ${attempt.reasons.join("; ")}`);
+  }
+  if (scenario.expectFailure && detail.data.failure !== scenario.expectFailure) {
+    failures.push(`expected failure type ${scenario.expectFailure}, got ${detail.data.failure}`);
+  }
+  if (scenario.expectImpact) {
+    const kept = detail.data.attempts.find((attempt) => attempt.status === "kept");
+    if (kept?.impact !== scenario.expectImpact) {
+      failures.push(`expected the applied fix to be judged ${scenario.expectImpact}, got ${kept?.impact}`);
+    }
   }
 
   const receipt = await call<{ text: string; wordedBy: string }>("GET", `/api/receipts/${incident.id}`);
@@ -193,13 +301,7 @@ async function main(): Promise<void> {
   if (receipt.status === 200) console.log(`  receipt (${receipt.data.wordedBy}): ${receipt.data.text.split("\n")[0]}`);
 
   await resetEnvironment({ ...scenario, allowedFixTypes: undefined });
-
-  if (failures.length > 0) {
-    console.log(`[scenario] ${name}: FAIL`);
-    for (const failure of failures) console.log(`  - ${failure}`);
-    process.exit(1);
-  }
-  console.log(`[scenario] ${name}: PASS`);
+  report(name, failures);
 }
 
 main().catch((error) => {

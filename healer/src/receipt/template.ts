@@ -17,6 +17,10 @@ function failureSentence(facts: ReceiptFacts): string {
     const memory = anomalies.find((anomaly) => anomaly.kind === "memory");
     return `${root} memory grew to ${Math.round(memory?.value ?? 0)} MB`;
   }
+  if (facts.failure === "gray") {
+    const gray = anomalies.find((anomaly) => anomaly.kind === "gray");
+    return `${root} kept passing its health check while ${percent(gray?.value ?? 0)} of requests failed or ran slow`;
+  }
   if (facts.failure === "slow") {
     const latency = anomalies.find((anomaly) => anomaly.kind === "latency");
     return `${root} p95 latency reached ${Math.round(latency?.value ?? 0)} ms`;
@@ -61,8 +65,15 @@ export function draftReceipt(facts: ReceiptFacts): string {
   }
   if (facts.after) {
     lines.push(
-      `After the fix: error rate ${percent(facts.after.errorRate)}, p95 latency ${Math.round(facts.after.p95LatencyMs)} ms.`,
+      `After the fix (production): error rate ${percent(facts.after.errorRate)}, p95 latency ${Math.round(facts.after.p95LatencyMs)} ms.`,
     );
+  }
+  const acted = facts.candidates.find((candidate) => candidate.impact);
+  if (acted?.impact) {
+    lines.push(`Did the action help: ${acted.impact.replace(/_/g, " ")}. ${acted.impactReasons.join("; ")}.`);
+  }
+  if (facts.recurrenceOf) {
+    lines.push(`This fault came back after an earlier fix (incident ${facts.recurrenceOf.slice(0, 8)}).`);
   }
 
   const duration = facts.durationSeconds !== null ? ` Duration: ${facts.durationSeconds} seconds.` : "";

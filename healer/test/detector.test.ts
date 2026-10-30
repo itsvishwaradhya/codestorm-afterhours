@@ -18,6 +18,7 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     healthy: true,
     errorRate: 0,
     p95LatencyMs: 20,
+    slowRate: 0,
     memoryMb: 60,
     requests: 100,
     activeFault: null,
@@ -67,5 +68,40 @@ describe("incident detector", () => {
     detector.observe(slow);
     const kinds = detector.observe(slow).map((anomaly) => anomaly.kind).sort();
     expect(kinds).toEqual(["latency", "memory"]);
+  });
+});
+
+describe("gray failure detection", () => {
+  const withGray = {
+    ...thresholds,
+    gray: { errorRate: 0.05, slowRate: 0.05, maxFraction: 0.9, consecutiveSamples: 3 },
+  };
+
+  function grayKinds(sample: Snapshot, times = 3): string[] {
+    const detector = createDetector(withGray);
+    let anomalies: ReturnType<typeof detector.observe> = [];
+    for (let i = 0; i < times; i += 1) anomalies = detector.observe(sample);
+    return anomalies.filter((anomaly) => anomaly.kind === "gray").map((anomaly) => anomaly.kind);
+  }
+
+  it("flags a service that passes its health check while 20% of requests fail", () => {
+    expect(grayKinds(snapshot({ healthy: true, errorRate: 0.2 }))).toEqual(["gray"]);
+  });
+
+  it("flags a service whose health check passes while 15% of requests are slow", () => {
+    expect(grayKinds(snapshot({ healthy: true, slowRate: 0.15 }))).toEqual(["gray"]);
+  });
+
+  it("needs three bad samples in a row because gray signals are noisy", () => {
+    expect(grayKinds(snapshot({ healthy: true, errorRate: 0.2 }), 2)).toEqual([]);
+  });
+
+  it("stays quiet below the thresholds", () => {
+    expect(grayKinds(snapshot({ healthy: true, errorRate: 0.02, slowRate: 0.03 }))).toEqual([]);
+  });
+
+  it("does not call a failing health check or a total outage gray", () => {
+    expect(grayKinds(snapshot({ healthy: false, errorRate: 0.2 }))).toEqual([]);
+    expect(grayKinds(snapshot({ healthy: true, errorRate: 1 }))).toEqual([]);
   });
 });

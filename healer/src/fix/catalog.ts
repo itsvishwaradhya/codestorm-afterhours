@@ -53,6 +53,7 @@ const CATALOG: Record<FailureType, FixCandidate[]> = {
   memory_leak: [RESTART],
   slow: [RESTART],
   bad_config: [REVERT_CONFIG, APPLY_STALE_SNAPSHOT, RESET_DEFAULTS],
+  gray: [RESTART],
 };
 
 const RISK_RANK: Record<Risk, number> = { low: 0, medium: 1, high: 2 };
@@ -65,6 +66,7 @@ export function classifyFailure(
   if (kinds.has("unreachable")) return "crash";
   if (configMode === "corrupt") return "bad_config";
   if (kinds.has("memory")) return "memory_leak";
+  if (kinds.has("gray")) return "gray";
   if (kinds.has("latency")) return "slow";
   return null;
 }

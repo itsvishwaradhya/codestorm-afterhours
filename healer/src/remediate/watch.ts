@@ -2,11 +2,14 @@ export interface WatchTotals {
   requests: number;
   errors: number;
   healthy: boolean;
+  slowRate?: number;
 }
 
 export interface WatchOptions {
   readTotals: () => Promise<WatchTotals | null>;
   preFixErrorRate: number;
+  preFixSlowRate?: number;
+  minSlowRate?: number;
   durationMs: number;
   intervalMs: number;
   minRequests: number;
@@ -21,7 +24,9 @@ function isBreach(current: WatchTotals | null, base: WatchTotals, options: Watch
   const errors = current.errors - base.errors;
   if (requests < options.minRequests) return false;
   const rate = errors / requests;
-  return rate >= options.minErrorRate && rate > options.preFixErrorRate;
+  if (rate >= options.minErrorRate && rate > options.preFixErrorRate) return true;
+  const slowRate = current.slowRate ?? 0;
+  return options.minSlowRate !== undefined && slowRate >= options.minSlowRate && slowRate > (options.preFixSlowRate ?? 0);
 }
 
 export async function watchService(options: WatchOptions): Promise<"ok" | "regressed"> {
