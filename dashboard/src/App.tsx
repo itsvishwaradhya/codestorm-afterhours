@@ -13,6 +13,7 @@ import { KpiCards, KpiSkeleton } from "@/components/app/kpi-cards";
 import { ServiceCard } from "@/components/app/service-card";
 import { ServiceMap } from "@/components/app/service-map";
 import { Sidebar, Topbar, type View } from "@/components/app/shell";
+import { Workspace } from "@/components/app/workspace-modes";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -226,6 +227,19 @@ export default function App() {
                       </div>
                     </div>
                   </>
+                )}
+
+                {view === "workspace" && (
+                  <Workspace
+                    snapshots={snapshots}
+                    incidents={incidents}
+                    activeIncident={active}
+                    pendingAttempts={pendingAttempts}
+                    scorecard={scorecard}
+                    roleFor={roleFor}
+                    onChaos={(service, fault) => chaos(service, fault)}
+                    onDecide={decide}
+                  />
                 )}
 
                 {view === "incidents" && (

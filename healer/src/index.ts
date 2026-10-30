@@ -26,9 +26,10 @@ import { ActionCap } from "./remediate/cap.js";
 import { RemediationGuard } from "./remediate/guard.js";
 import { isTerminal, Remediator, type RemediationPlan } from "./remediate/remediator.js";
 import { createProviders } from "./receipt/providers.js";
+import { AppHealer } from "./app/healer.js";
 import { ReceiptWriter } from "./receipt/writer.js";
 import { watchService } from "./remediate/watch.js";
-import { Supervisor } from "./supervisor/supervisor.js";
+import { Supervisor, type LogLine } from "./supervisor/supervisor.js";
 import { connectStore } from "./store/db.js";
 import * as repo from "./store/repository.js";
 import { fixtureFor } from "./verify/fixture.js";
@@ -90,8 +91,33 @@ async function main(): Promise<void> {
   const cap = new ActionCap(config.actionCap.max, config.actionCap.windowMs);
   const guard = new RemediationGuard(config.guard);
   const ports = new PortPool(config.clonePorts.from, config.clonePorts.to);
-  const supervisor = new Supervisor(config.healerUrl);
+  // The last few hundred service log lines, so a workspace opened mid-demo is not blank.
+  const recentLogs: LogLine[] = [];
+  const supervisor = new Supervisor(config.healerUrl, (entry) => {
+    recentLogs.push(entry);
+    if (recentLogs.length > 300) recentLogs.shift();
+    gateway.publish("log", entry);
+  });
   process.on("exit", () => supervisor.stop());
+
+  const appHealer = new AppHealer({
+    providers: createProviders(process.env),
+    publish: (channel, payload) => gateway.publish(channel, payload),
+    audit,
+  });
+  appHealer.start();
+  process.on("exit", () => appHealer.stop());
+
+  // The browser terminal: replay scrollback on attach, then stream keystrokes and output both ways.
+  gateway.onClient((socket) => {
+    socket.on("pty-attach", () => socket.emit("pty-data", appHealer.terminal.history()));
+    socket.on("pty-input", (data: unknown) => {
+      if (typeof data === "string" && data.length <= 10_000) appHealer.terminal.input(data);
+    });
+    socket.on("pty-resize", (size: { cols?: unknown; rows?: unknown }) => {
+      if (typeof size?.cols === "number" && typeof size?.rows === "number") appHealer.terminal.resize(size.cols, size.rows);
+    });
+  });
 
   const verify = createVerifier({
     captures: async (service, sinceIso) => {
@@ -255,6 +281,8 @@ async function main(): Promise<void> {
     cap,
     guard,
     reset: resetDemo,
+    recentLogs: () => [...recentLogs],
+    app: appHealer,
   });
 
   await new Promise<void>((resolve) => server.listen(config.healerPort, resolve));

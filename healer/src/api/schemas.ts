@@ -27,6 +27,24 @@ export const guardResetSchema = z.object({
   service: z.enum(SERVICE_NAMES),
 });
 
+export const workspaceFileSchema = z.object({
+  path: z.string().min(1).max(300),
+});
+
+export const appFileSchema = z.object({
+  path: z.string().min(1).max(300),
+  content: z.string(),
+});
+
+export const appRenameSchema = z.object({
+  from: z.string().min(1).max(300),
+  to: z.string().min(1).max(300),
+});
+
+export const appExecSchema = z.object({
+  command: z.string().trim().min(1).max(300),
+});
+
 export const approvalSchema = z.object({
   decision: z.enum(["approve", "reject"]),
 });

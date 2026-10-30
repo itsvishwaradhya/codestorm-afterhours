@@ -17,7 +17,21 @@ import type { ServiceRegistry } from "../registry.js";
 import { guardrailSavings } from "../report/guardrails.js";
 import { healTiming } from "../report/timing.js";
 import * as repo from "../store/repository.js";
-import { approvalSchema, captureSchema, chaosSchema, guardResetSchema, serviceUpdateSchema } from "./schemas.js";
+import type { LogLine } from "../supervisor/supervisor.js";
+import type { AppHealer } from "../app/healer.js";
+import { deleteAppPath, listTree, makeAppDir, readAppFile, renameAppPath, resetApp, writeAppFile } from "../app/files.js";
+import {
+  appExecSchema,
+  appFileSchema,
+  appRenameSchema,
+  approvalSchema,
+  captureSchema,
+  chaosSchema,
+  guardResetSchema,
+  serviceUpdateSchema,
+  workspaceFileSchema,
+} from "./schemas.js";
+import { workspaceFile, workspaceTree } from "./workspace.js";
 
 type AuditInput = Omit<AuditEntry, "id" | "at">;
 
@@ -31,6 +45,8 @@ export interface ApiContext {
   cap: ActionCap;
   guard: RemediationGuard;
   reset: () => Promise<boolean>;
+  recentLogs: () => LogLine[];
+  app: AppHealer;
 }
 
 type Handler = (req: Request, res: Response) => Promise<void>;
@@ -98,6 +114,137 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
         repo.listAuditByAction(ctx.db, "action.suppressed", 500),
       ]);
       res.json(guardrailSavings({ incidents, attempts, suppressed }));
+    }),
+  );
+
+  // Uploaded app workspace. Localhost only: /api/app/exec runs shell commands on this machine.
+  app.post(
+    "/api/app/reset",
+    wrap(async (_req, res) => {
+      await ctx.app.beforeReset();
+      await resetApp();
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/app/files",
+    wrap(async (req, res) => {
+      const parsed = appFileSchema.safeParse(req.body);
+      if (!parsed.success || !(await writeAppFile(parsed.data.path, parsed.data.content))) {
+        res.status(400).json({ error: "file rejected" });
+        return;
+      }
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/app/uploaded",
+    wrap(async (_req, res) => {
+      await ctx.app.uploaded();
+      res.json(await listTree());
+    }),
+  );
+
+  app.get(
+    "/api/app/tree",
+    wrap(async (_req, res) => {
+      res.json(await listTree());
+    }),
+  );
+
+  app.get(
+    "/api/app/file",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.query);
+      const content = parsed.success ? await readAppFile(parsed.data.path) : null;
+      if (!parsed.success || content === null) {
+        res.status(404).json({ error: "file not found" });
+        return;
+      }
+      res.json({ path: parsed.data.path, content });
+    }),
+  );
+
+  app.post(
+    "/api/app/exec",
+    wrap(async (req, res) => {
+      const parsed = appExecSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "command required" });
+        return;
+      }
+      ctx.app.run(parsed.data.command);
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/app/mkdir",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.body);
+      res.status(parsed.success && (await makeAppDir(parsed.data.path)) ? 200 : 400).json(await listTree());
+    }),
+  );
+
+  app.post(
+    "/api/app/delete",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.body);
+      res.status(parsed.success && (await deleteAppPath(parsed.data.path)) ? 200 : 400).json(await listTree());
+    }),
+  );
+
+  app.post(
+    "/api/app/rename",
+    wrap(async (req, res) => {
+      const parsed = appRenameSchema.safeParse(req.body);
+      res.status(parsed.success && (await renameAppPath(parsed.data.from, parsed.data.to)) ? 200 : 400).json(await listTree());
+    }),
+  );
+
+  app.post(
+    "/api/app/stop",
+    wrap(async (_req, res) => {
+      await ctx.app.stopApp();
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/app/inject",
+    wrap(async (_req, res) => {
+      const injection = await ctx.app.inject();
+      res.json(injection ? { file: injection.file, description: injection.description, injectedBy: injection.injectedBy } : null);
+    }),
+  );
+
+  app.get("/api/app/state", (_req, res) => {
+    res.json(ctx.app.state());
+  });
+
+  app.get("/api/logs", (_req, res) => {
+    res.json(ctx.recentLogs());
+  });
+
+  app.get(
+    "/api/workspace/tree",
+    wrap(async (_req, res) => {
+      res.json(await workspaceTree());
+    }),
+  );
+
+  app.get(
+    "/api/workspace/file",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.query);
+      const content = parsed.success ? await workspaceFile(parsed.data.path).catch(() => null) : null;
+      if (!parsed.success || content === null) {
+        res.status(404).json({ error: "file not in the workspace" });
+        return;
+      }
+      res.json({ path: parsed.data.path, content });
     }),
   );
 

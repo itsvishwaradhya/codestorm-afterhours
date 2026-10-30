@@ -141,7 +141,7 @@ All variables are optional. See `.env.example`.
 | `WATCH_SECONDS` | `60` | Post-fix production watch |
 | `LLM_ENABLED` | `true` if a key exists | Set to `false` to force template receipts |
 | `GROQ_API_KEY` / `GROQ_MODEL` | unset / `openai/gpt-oss-20b` | First optional receipt provider |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | unset / `gemini-2.5-flash` | Second optional provider |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | unset / `gemini-flash-latest` | Second optional provider |
 | `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` | unset / a `:free` model | Last optional provider |
 
 LLM failures, timeouts, rate limits, or rejected replies fall back to the template receipt.

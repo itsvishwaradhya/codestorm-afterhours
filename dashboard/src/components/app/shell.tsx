@@ -1,14 +1,15 @@
 import type { ReactNode } from "react";
-import { BookOpen, LayoutDashboard, Moon, ScrollText, Siren, Wifi, WifiOff, type LucideIcon } from "lucide-react";
+import { BookOpen, Code2, LayoutDashboard, Moon, ScrollText, Siren, Wifi, WifiOff, type LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { StatusDot } from "./status";
 
-export type View = "overview" | "incidents" | "audit";
+export type View = "overview" | "workspace" | "incidents" | "audit";
 
 const NAV: { id: View; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "workspace", label: "Workspace", icon: Code2 },
   { id: "incidents", label: "Incidents", icon: Siren },
   { id: "audit", label: "Audit log", icon: ScrollText },
 ];
