@@ -180,7 +180,7 @@ export function AttemptsTable({ attempts }: { attempts: Attempt[] }) {
   }
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[640px] text-left text-sm">
+      <table className="w-full min-w-160 text-left text-sm">
         <thead className="text-xs uppercase text-slate-500">
           <tr>
             <th className="py-2 pr-3">Fix</th>
