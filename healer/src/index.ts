@@ -26,6 +26,7 @@ import { ActionCap } from "./remediate/cap.js";
 import { RemediationGuard } from "./remediate/guard.js";
 import { isTerminal, Remediator, type RemediationPlan } from "./remediate/remediator.js";
 import { createProviders } from "./receipt/providers.js";
+import { AppHealer } from "./app/healer.js";
 import { ReceiptWriter } from "./receipt/writer.js";
 import { watchService } from "./remediate/watch.js";
 import { Supervisor, type LogLine } from "./supervisor/supervisor.js";
@@ -98,6 +99,14 @@ async function main(): Promise<void> {
     gateway.publish("log", entry);
   });
   process.on("exit", () => supervisor.stop());
+
+  const appHealer = new AppHealer({
+    providers: createProviders(process.env),
+    publish: (channel, payload) => gateway.publish(channel, payload),
+    audit,
+  });
+  appHealer.start();
+  process.on("exit", () => appHealer.stop());
 
   const verify = createVerifier({
     captures: async (service, sinceIso) => {
@@ -262,6 +271,7 @@ async function main(): Promise<void> {
     guard,
     reset: resetDemo,
     recentLogs: () => [...recentLogs],
+    app: appHealer,
   });
 
   await new Promise<void>((resolve) => server.listen(config.healerPort, resolve));

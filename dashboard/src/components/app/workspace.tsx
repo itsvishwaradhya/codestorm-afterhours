@@ -23,9 +23,9 @@ const CodeEditor = lazy(() => import("./code-editor"));
 const DEFAULT_FILE = "services/src/service.ts";
 const MAX_LINES = 500;
 
-type Tone = "muted" | "info" | "ok" | "warn" | "error" | "cmd";
+export type Tone = "muted" | "info" | "ok" | "warn" | "error" | "cmd";
 
-interface TermLine {
+export interface TermLine {
   id: number;
   at: string;
   tag: string;
@@ -33,16 +33,19 @@ interface TermLine {
   tone: Tone;
 }
 
-const TAG_COLOR: Record<string, string> = {
+export const TAG_COLOR: Record<string, string> = {
   orders: "text-sky-400",
   payments: "text-violet-400",
   inventory: "text-amber-400",
   healer: "text-emerald-400",
   nightshift: "text-indigo-300",
   $: "text-zinc-400",
+  app: "text-cyan-300",
+  shell: "text-zinc-300",
+  clone: "text-fuchsia-300",
 };
 
-const TONE_COLOR: Record<Tone, string> = {
+export const TONE_COLOR: Record<Tone, string> = {
   muted: "text-zinc-400",
   info: "text-zinc-200",
   ok: "text-emerald-300",
@@ -60,7 +63,7 @@ const STATE_TONE: Partial<Record<Incident["state"], Tone>> = {
 };
 
 let nextId = 0;
-const line = (tag: string, text: string, tone: Tone = "info", at = new Date().toISOString()): TermLine => ({
+export const line = (tag: string, text: string, tone: Tone = "info", at = new Date().toISOString()): TermLine => ({
   id: nextId++,
   at,
   tag,
@@ -115,14 +118,14 @@ function useTerminalFeed() {
   return { lines, push, clear: () => setLines([]) };
 }
 
-interface TreeNode {
+export interface TreeNode {
   name: string;
   path: string;
   children: Map<string, TreeNode>;
   file?: WorkspaceFile;
 }
 
-function buildTree(files: WorkspaceFile[]): TreeNode {
+export function buildTree(files: WorkspaceFile[]): TreeNode {
   const root: TreeNode = { name: "", path: "", children: new Map() };
   for (const file of files) {
     let node = root;
@@ -137,7 +140,7 @@ function buildTree(files: WorkspaceFile[]): TreeNode {
   return root;
 }
 
-function TreeItem({
+export function TreeItem({
   node,
   depth,
   selected,
@@ -214,7 +217,7 @@ const HELP = [
   "cls                           clear the terminal",
 ];
 
-export function Workspace(props: WorkspaceProps) {
+export function DemoWorkspace(props: WorkspaceProps) {
   const { snapshots, incidents, activeIncident, pendingAttempts, scorecard, roleFor, onChaos, onDecide } = props;
   const [files, setFiles] = useState<WorkspaceFile[] | null>(null);
   const [selected, setSelected] = useState(DEFAULT_FILE);
@@ -382,7 +385,7 @@ export function Workspace(props: WorkspaceProps) {
   };
 
   return (
-    <div className="grid h-[calc(100vh-7.5rem)] min-h-[600px] gap-3 lg:grid-cols-[230px_minmax(0,1fr)_290px]">
+    <div className="grid h-[calc(100vh-10.5rem)] min-h-[560px] gap-3 lg:grid-cols-[230px_minmax(0,1fr)_290px]">
       {/* Explorer */}
       <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-[#1b1b1f]">
         <header className="border-b border-white/10 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-zinc-400">

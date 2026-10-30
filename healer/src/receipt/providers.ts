@@ -16,6 +16,9 @@ async function chatCompletion(
     body: JSON.stringify({
       model,
       temperature: 0.2,
+      max_tokens: 4096,
+      // gpt-oss spends the whole budget reasoning at the default effort and returns no content.
+      ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {}),
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -53,7 +56,7 @@ export function createProviders(env: Env): LlmProvider[] {
 
   if (env.GEMINI_API_KEY) {
     const key = env.GEMINI_API_KEY;
-    const model = env.GEMINI_MODEL ?? "gemini-2.5-flash";
+    const model = env.GEMINI_MODEL ?? "gemini-flash-latest";
     providers.push({
       id: "gemini",
       complete: async (system, user, signal) => {

@@ -18,7 +18,11 @@ import { guardrailSavings } from "../report/guardrails.js";
 import { healTiming } from "../report/timing.js";
 import * as repo from "../store/repository.js";
 import type { LogLine } from "../supervisor/supervisor.js";
+import type { AppHealer } from "../app/healer.js";
+import { listFiles, readAppFile, resetApp, writeAppFile } from "../app/files.js";
 import {
+  appExecSchema,
+  appFileSchema,
   approvalSchema,
   captureSchema,
   chaosSchema,
@@ -41,6 +45,7 @@ export interface ApiContext {
   guard: RemediationGuard;
   reset: () => Promise<boolean>;
   recentLogs: () => LogLine[];
+  app: AppHealer;
 }
 
 type Handler = (req: Request, res: Response) => Promise<void>;
@@ -110,6 +115,89 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
       res.json(guardrailSavings({ incidents, attempts, suppressed }));
     }),
   );
+
+  // Uploaded app workspace. Localhost only: /api/app/exec runs shell commands on this machine.
+  app.post(
+    "/api/app/reset",
+    wrap(async (_req, res) => {
+      await ctx.app.stopApp();
+      await resetApp();
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/app/files",
+    wrap(async (req, res) => {
+      const parsed = appFileSchema.safeParse(req.body);
+      if (!parsed.success || !(await writeAppFile(parsed.data.path, parsed.data.content))) {
+        res.status(400).json({ error: "file rejected" });
+        return;
+      }
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/app/uploaded",
+    wrap(async (_req, res) => {
+      await ctx.app.uploaded();
+      res.json(await listFiles());
+    }),
+  );
+
+  app.get(
+    "/api/app/tree",
+    wrap(async (_req, res) => {
+      res.json(await listFiles());
+    }),
+  );
+
+  app.get(
+    "/api/app/file",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.query);
+      const content = parsed.success ? await readAppFile(parsed.data.path) : null;
+      if (!parsed.success || content === null) {
+        res.status(404).json({ error: "file not found" });
+        return;
+      }
+      res.json({ path: parsed.data.path, content });
+    }),
+  );
+
+  app.post(
+    "/api/app/exec",
+    wrap(async (req, res) => {
+      const parsed = appExecSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "command required" });
+        return;
+      }
+      await ctx.app.exec(parsed.data.command);
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/app/stop",
+    wrap(async (_req, res) => {
+      await ctx.app.stopApp();
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/app/inject",
+    wrap(async (_req, res) => {
+      const injection = await ctx.app.inject();
+      res.json(injection ? { file: injection.file, description: injection.description, injectedBy: injection.injectedBy } : null);
+    }),
+  );
+
+  app.get("/api/app/state", (_req, res) => {
+    res.json(ctx.app.state());
+  });
 
   app.get("/api/logs", (_req, res) => {
     res.json(ctx.recentLogs());

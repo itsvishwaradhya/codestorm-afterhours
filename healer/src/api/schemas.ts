@@ -31,6 +31,15 @@ export const workspaceFileSchema = z.object({
   path: z.string().min(1).max(300),
 });
 
+export const appFileSchema = z.object({
+  path: z.string().min(1).max(300),
+  content: z.string(),
+});
+
+export const appExecSchema = z.object({
+  command: z.string().trim().min(1).max(300),
+});
+
 export const approvalSchema = z.object({
   decision: z.enum(["approve", "reject"]),
 });
