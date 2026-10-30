@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { resolveAppPath } from "../src/app/files.js";
 import { scriptedBug } from "../src/app/inject.js";
 import { discoverRoutes, summarize } from "../src/app/proxy.js";
-import { isServerCommand } from "../src/app/runner.js";
+import { isServerCommand } from "../src/app/terminal.js";
 
 const ROOT = path.resolve("/workspaces/app");
 
