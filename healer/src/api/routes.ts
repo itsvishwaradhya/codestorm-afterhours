@@ -20,10 +20,12 @@ import * as repo from "../store/repository.js";
 import type { LogLine } from "../supervisor/supervisor.js";
 import type { AppHealer } from "../app/healer.js";
 import { GOOD_ROOT, deleteAppPath, listTree, makeAppDir, readAppFile, renameAppPath, resetApp, writeAppFile, zipApp } from "../app/files.js";
+import { BUG_CATALOG, BUG_KINDS, listTargets } from "../app/inject.js";
 import { PROXY_PORT } from "../app/proxy.js";
 import {
   appExecSchema,
   appFileSchema,
+  appInjectSchema,
   appRenameSchema,
   appRequestSchema,
   approvalSchema,
@@ -268,11 +270,31 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
     }),
   );
 
+  // What the inject picker offers: GET routes NightShift's traffic reaches, and the bug catalog.
+  app.get(
+    "/api/app/inject-options",
+    wrap(async (_req, res) => {
+      res.json({
+        targets: await listTargets(),
+        kinds: BUG_KINDS.map((id) => ({ id, label: BUG_CATALOG[id].label, effect: BUG_CATALOG[id].effect })),
+      });
+    }),
+  );
+
   app.post(
     "/api/app/inject",
-    wrap(async (_req, res) => {
-      const injection = await ctx.app.inject();
-      res.json(injection ? { file: injection.file, description: injection.description, injectedBy: injection.injectedBy } : null);
+    wrap(async (req, res) => {
+      const parsed = appInjectSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({ error: "unknown route or bug kind" });
+        return;
+      }
+      const injection = await ctx.app.inject(parsed.data);
+      res.json(
+        injection
+          ? { file: injection.file, route: injection.route, kind: injection.kind, description: injection.description, injectedBy: injection.injectedBy }
+          : null,
+      );
     }),
   );
 

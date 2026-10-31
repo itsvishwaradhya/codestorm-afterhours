@@ -46,7 +46,17 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { api, type AppIncident, type AppLog, type AppResponse, type AppState, type HttpMethod, type WorkspaceFile } from "@/api";
+import {
+  api,
+  type AppIncident,
+  type AppLog,
+  type AppResponse,
+  type AppState,
+  type BugKind,
+  type HttpMethod,
+  type InjectOptions,
+  type WorkspaceFile,
+} from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -263,6 +273,9 @@ export function AppWorkspace() {
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [uploading, setUploading] = useState<string | null>(null);
   const [injecting, setInjecting] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [injectOptions, setInjectOptions] = useState<InjectOptions | null>(null);
+  const [choice, setChoice] = useState<{ route: string; kind: BugKind | "" }>({ route: "", kind: "" });
   const [notice, setNotice] = useState<string | null>(null);
   const folderRef = useRef<HTMLInputElement>(null);
   const outputRef = useRef<HTMLDivElement>(null);
@@ -620,12 +633,25 @@ export function AppWorkspace() {
     }
   };
 
+  // The picker re-reads the routes each time, since the code may have changed.
+  const openPicker = async () => {
+    setPickerOpen(true);
+    try {
+      const options = await api.app.injectOptions();
+      setInjectOptions(options);
+      setChoice((current) => (current.route && !options.targets.some((target) => target.route === current.route) ? { ...current, route: "" } : current));
+    } catch (error) {
+      flash(`Could not load routes: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const inject = async () => {
+    setPickerOpen(false);
     setInjecting(true);
     setPanel("output");
     setPanelOpen(true);
     try {
-      const result = await api.app.inject();
+      const result = await api.app.inject({ route: choice.route || undefined, kind: choice.kind || undefined });
       if (result) {
         await reloadClean();
         void openFile(result.file);
@@ -1209,11 +1235,71 @@ export function AppWorkspace() {
                 {state?.command ?? "npm start"}
               </Button>
             )}
-            <Button size="sm" className="flex-1" disabled={!state?.running || injecting || Boolean(live)} onClick={() => void inject()}>
+            <Button
+              size="sm"
+              className="flex-1"
+              variant={pickerOpen ? "secondary" : "default"}
+              disabled={!state?.running || injecting || Boolean(live)}
+              onClick={() => (pickerOpen ? setPickerOpen(false) : void openPicker())}
+            >
               {injecting ? <Loader2 className="animate-spin" /> : <Bug />}
-              AI: inject bug
+              {injecting ? "Injecting…" : "AI: inject bug"}
             </Button>
           </div>
+          {pickerOpen && state?.running && !live && (
+            <div className="mt-3 space-y-2 rounded-lg border bg-background/40 p-2.5 text-xs">
+              <label className="block space-y-1">
+                <span className="text-muted-foreground">Route to break</span>
+                <select
+                  value={choice.route}
+                  onChange={(event) => setChoice((current) => ({ ...current, route: event.target.value }))}
+                  className="h-8 w-full rounded-md border bg-background px-2 font-mono text-xs"
+                >
+                  <option value="">Busiest file, first route</option>
+                  {(injectOptions?.targets ?? []).map((target) => (
+                    <option key={`${target.file}:${target.route}`} value={target.route}>
+                      GET {target.route} · {target.file}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block space-y-1">
+                <span className="text-muted-foreground">Kind of bug</span>
+                <select
+                  value={choice.kind}
+                  onChange={(event) => setChoice((current) => ({ ...current, kind: event.target.value as BugKind | "" }))}
+                  className="h-8 w-full rounded-md border bg-background px-2 text-xs"
+                >
+                  <option value="">Let the AI decide</option>
+                  {(injectOptions?.kinds ?? []).map((kind) => (
+                    <option key={kind.id} value={kind.id}>
+                      {kind.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="text-muted-foreground">
+                {(() => {
+                  const target = injectOptions?.targets.find((item) => item.route === choice.route);
+                  const kind = injectOptions?.kinds.find((item) => item.id === choice.kind);
+                  const where = target ? `GET ${target.route} in ${target.file}` : "the first route of the busiest file";
+                  return kind ? `Breaks ${where}: ${kind.effect}.` : `The AI writes a realistic bug for ${where}.`;
+                })()}
+              </p>
+              {injectOptions && injectOptions.targets.length === 0 && (
+                <p className="text-amber-500">No GET routes with a fixed path found, so there is nothing NightShift's traffic would notice.</p>
+              )}
+              <div className="flex gap-2">
+                <Button size="sm" variant="ghost" className="flex-1" onClick={() => setPickerOpen(false)}>
+                  Cancel
+                </Button>
+                <Button size="sm" className="flex-1" disabled={injectOptions?.targets.length === 0} onClick={() => void inject()}>
+                  <Bug />
+                  Inject
+                </Button>
+              </div>
+            </div>
+          )}
           <p className="mt-2 text-[11px] text-muted-foreground">
             Traffic runs through NightShift's proxy on :{state?.proxyPort ?? 4500}, so your app needs no changes.
           </p>
@@ -1271,7 +1357,8 @@ export function AppWorkspace() {
               {incident.injection && (
                 <p className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200">
                   <ShieldAlert className="mr-1 inline size-3.5" />
-                  {incident.injection.injectedBy} changed <span className="font-mono">{incident.injection.file}</span>: {incident.injection.description}
+                  {incident.injection.injectedBy} changed <span className="font-mono">{incident.injection.file}</span>
+                  {incident.injection.route && <> (GET <span className="font-mono">{incident.injection.route}</span>)</>}: {incident.injection.description}
                   <button
                     onClick={() => incident.injection && void openDiff(incident.injection.file)}
                     className="mt-1.5 flex items-center gap-1 rounded border border-rose-400/40 px-1.5 py-0.5 text-[11px] text-rose-100 hover:bg-rose-500/20"

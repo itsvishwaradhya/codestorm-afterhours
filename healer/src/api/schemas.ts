@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { FAULT_TYPES, GRAY_MODES, SERVICE_NAMES } from "@nightshift/shared";
+import { BUG_KINDS } from "../app/inject.js";
 
 export const serviceUpdateSchema = z.object({
   name: z.enum(SERVICE_NAMES),
@@ -47,6 +48,11 @@ export const appExecSchema = z.object({
 
 export const approvalSchema = z.object({
   decision: z.enum(["approve", "reject"]),
+});
+
+export const appInjectSchema = z.object({
+  route: z.string().startsWith("/").max(300).optional(),
+  kind: z.enum(BUG_KINDS).optional(),
 });
 
 export const appRequestSchema = z.object({

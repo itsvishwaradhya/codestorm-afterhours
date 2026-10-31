@@ -17,7 +17,7 @@ import {
   snapshotGood,
   writeAppFile,
 } from "./files.js";
-import { injectBug, type Injection } from "./inject.js";
+import { injectBug, type InjectOptions, type Injection } from "./inject.js";
 import { AppTraffic, MeasuringProxy, discoverRoutes, summarize, type Sample, type WindowStats } from "./proxy.js";
 import { AppRunner, isPortOpen, waitForPort, type AppLog } from "./runner.js";
 import { APP_PORT, AppTerminal } from "./terminal.js";
@@ -223,7 +223,7 @@ export class AppHealer {
     }
   }
 
-  async inject(): Promise<Injection | null> {
+  async inject(options: InjectOptions = {}): Promise<Injection | null> {
     if (!this.runner.status().running) {
       this.say("start the app first (for example: npm start)", "stderr");
       return null;
@@ -233,7 +233,12 @@ export class AppHealer {
       return null;
     }
     await snapshotGood();
-    const injection = await injectBug(this.deps.providers, (line) => this.say(line), (file, content) => this.breaksApp(file, content));
+    const injection = await injectBug(
+      this.deps.providers,
+      (line) => this.say(line),
+      (file, content) => this.breaksApp(file, content),
+      options,
+    );
     if (!injection) return null;
     await writeAppFile(injection.file, injection.after);
     this.lastInjection = injection;
@@ -244,7 +249,7 @@ export class AppHealer {
       action: "app.bug.injected",
       trigger: `${injection.injectedBy}: ${injection.description}`,
       incidentId: null,
-      details: { file: injection.file },
+      details: { file: injection.file, route: injection.route, kind: injection.kind },
     });
     await this.restartApp();
     return injection;
@@ -381,7 +386,13 @@ export class AppHealer {
       trigger,
       changedFiles: changed,
       injection: this.lastInjection
-        ? { file: this.lastInjection.file, description: this.lastInjection.description, injectedBy: this.lastInjection.injectedBy }
+        ? {
+            file: this.lastInjection.file,
+            route: this.lastInjection.route,
+            kind: this.lastInjection.kind,
+            description: this.lastInjection.description,
+            injectedBy: this.lastInjection.injectedBy,
+          }
         : null,
       candidates: [],
       outcome: null,

@@ -1,7 +1,7 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { GOOD_ROOT, resolveAppPath, zipEntries } from "../src/app/files.js";
-import { scriptedBug } from "../src/app/inject.js";
+import { BUG_KINDS, scriptedBug, targetsIn } from "../src/app/inject.js";
 import { discoverRoutes, summarize } from "../src/app/proxy.js";
 import { isServerCommand } from "../src/app/terminal.js";
 
@@ -20,17 +20,41 @@ describe("resolveAppPath", () => {
 });
 
 describe("scriptedBug", () => {
-  it("throws at the top of the first GET handler", () => {
-    const source = 'app.get("/items", (req, res) => {\n  res.json([]);\n});\n';
+  const source = 'app.get("/items", (req, res) => {\n  res.json([]);\n});\napp.get("/users", (req, res) => {\n  res.json([]);\n});\n';
+
+  it("puts the default bug at the top of the first GET handler", () => {
     const bug = scriptedBug(source);
     expect(bug?.description).toContain("/items");
-    expect(bug?.content).toContain('throw new Error("lookup failed")');
-    expect(bug?.content.indexOf("throw")).toBeLessThan(bug!.content.indexOf("res.json"));
+    expect(bug?.content).toContain("owner.length");
+    expect(bug?.content.indexOf("owner.length")).toBeLessThan(bug!.content.indexOf("res.json"));
+  });
+
+  it("targets the chosen route with the chosen kind", () => {
+    const bug = scriptedBug(source, "/users", "error_response");
+    expect(bug?.description).toContain("GET /users");
+    const users = bug!.content.indexOf('"/users"');
+    expect(bug!.content.indexOf("status(500)")).toBeGreaterThan(users);
+    expect(bug!.content.slice(0, users)).not.toContain("status(500)");
+    expect(scriptedBug(source, "/missing")).toBeNull();
+  });
+
+  it("produces valid JavaScript for every kind", () => {
+    for (const kind of BUG_KINDS) {
+      const bug = scriptedBug(source, "/items", kind);
+      expect(() => new Function("app", "process", bug!.content)).not.toThrow();
+    }
   });
 
   it("handles function handlers and routers", () => {
     expect(scriptedBug("router.get('/a', async function (req, res) { res.end(); });")).not.toBeNull();
     expect(scriptedBug("const x = 1;")).toBeNull();
+  });
+});
+
+describe("targetsIn", () => {
+  it("lists static GET routes and skips parameterised ones", () => {
+    const source = 'app.get("/a", (q, r) => { r.end(); });\nrouter.get("/b/:id", (q, r) => { r.end(); });\napp.post("/c", (q, r) => { r.end(); });';
+    expect(targetsIn("server.js", source)).toEqual([{ file: "server.js", route: "/a" }]);
   });
 });
 
