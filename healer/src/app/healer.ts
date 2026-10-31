@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync, watch, type FSWatcher } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AuditEntry } from "@nightshift/shared";
@@ -84,6 +85,8 @@ export class AppHealer {
   private expectDown = false;
   private waitingForRecovery = false;
   private lastInjection: Injection | null = null;
+  private watcher: FSWatcher | null = null;
+  private treeTimer: NodeJS.Timeout | null = null;
   incident: AppIncident | null = null;
 
   constructor(private readonly deps: AppHealerDeps) {
@@ -95,11 +98,33 @@ export class AppHealer {
   start(): void {
     this.proxy.start();
     this.terminal.start();
+    this.watchTree();
     this.timer = setInterval(() => void this.tick(), TICK_MS);
+  }
+
+  // Tells the explorer when files change on disk (terminal, npm, injection, rollback).
+  private watchTree(): void {
+    this.watcher?.close();
+    this.watcher = null;
+    try {
+      mkdirSync(APP_ROOT, { recursive: true });
+      this.watcher = watch(APP_ROOT, { recursive: true }, (_event, name) => {
+        if (name && /(^|[\\/])(node_modules|\.git)([\\/]|$)/.test(name)) return;
+        if (this.treeTimer) clearTimeout(this.treeTimer);
+        this.treeTimer = setTimeout(() => this.deps.publish("app-tree", null), 300);
+      });
+      this.watcher.on("error", () => {
+        this.watcher?.close();
+        this.watcher = null;
+      });
+    } catch {
+      this.watcher = null;
+    }
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
+    this.watcher?.close();
     this.traffic.stop();
     this.proxy.stop();
     void this.runner.stop();
@@ -141,6 +166,8 @@ export class AppHealer {
   async beforeReset(): Promise<void> {
     await this.stopApp();
     this.terminal.kill();
+    this.watcher?.close();
+    this.watcher = null;
   }
 
   async uploaded(): Promise<void> {
@@ -149,6 +176,7 @@ export class AppHealer {
     this.lastInjection = null;
     this.savedGood = false;
     this.terminal.restart();
+    this.watchTree();
     await this.refreshRoutes();
     this.emit();
   }

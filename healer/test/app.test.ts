@@ -1,6 +1,6 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveAppPath } from "../src/app/files.js";
+import { GOOD_ROOT, resolveAppPath, zipEntries } from "../src/app/files.js";
 import { scriptedBug } from "../src/app/inject.js";
 import { discoverRoutes, summarize } from "../src/app/proxy.js";
 import { isServerCommand } from "../src/app/terminal.js";
@@ -61,5 +61,28 @@ describe("app helpers", () => {
     expect(isServerCommand("node server.js")).toBe(true);
     expect(isServerCommand("npm install")).toBe(false);
     expect(isServerCommand("ls")).toBe(false);
+  });
+});
+
+describe("zipEntries", () => {
+  it("writes one local header per file and a matching central directory", () => {
+    const zip = zipEntries([
+      { path: "server.js", data: Buffer.from("console.log(1)") },
+      { path: "src/app.js", data: Buffer.from("") },
+    ]);
+    expect(zip.readUInt32LE(0)).toBe(0x04034b50);
+    const end = zip.length - 22;
+    expect(zip.readUInt32LE(end)).toBe(0x06054b50);
+    expect(zip.readUInt16LE(end + 10)).toBe(2);
+    const directoryAt = zip.readUInt32LE(end + 16);
+    expect(zip.readUInt32LE(directoryAt)).toBe(0x02014b50);
+    expect(zip.includes(Buffer.from("src/app.js"))).toBe(true);
+  });
+});
+
+describe("good copy paths", () => {
+  it("stay inside the last known good folder", () => {
+    expect(resolveAppPath("server.js", GOOD_ROOT)).toBe(path.join(GOOD_ROOT, "server.js"));
+    expect(resolveAppPath("../app/server.js", GOOD_ROOT)).toBeNull();
   });
 });

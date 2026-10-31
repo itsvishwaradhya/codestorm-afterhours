@@ -70,6 +70,15 @@ export interface AppState {
   hasSnapshot: boolean;
 }
 
+export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
+export interface AppResponse {
+  status: number;
+  ms: number;
+  contentType: string | null;
+  body: string;
+}
+
 export interface CapStatus {
   used: number;
   max: number;
@@ -173,5 +182,10 @@ export const api = {
     stop: () => request("POST", "/api/app/stop"),
     inject: () => request<{ file: string; description: string; injectedBy: string } | null>("POST", "/api/app/inject"),
     state: () => request<AppState>("GET", "/api/app/state"),
+    goodFile: (path: string) =>
+      request<{ path: string; content: string }>("GET", `/api/app/good-file?path=${encodeURIComponent(path)}`),
+    request: (method: HttpMethod, path: string, body?: string) =>
+      request<AppResponse>("POST", "/api/app/request", { method, path, body: body || undefined }),
+    downloadUrl: "/api/app/download",
   },
 };

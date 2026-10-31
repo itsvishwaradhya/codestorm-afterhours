@@ -48,3 +48,9 @@ export const appExecSchema = z.object({
 export const approvalSchema = z.object({
   decision: z.enum(["approve", "reject"]),
 });
+
+export const appRequestSchema = z.object({
+  method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("GET"),
+  path: z.string().startsWith("/").max(300),
+  body: z.string().max(20_000).optional(),
+});

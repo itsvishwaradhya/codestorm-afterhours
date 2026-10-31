@@ -1,5 +1,6 @@
 import { cp, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { crc32 } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 export const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -20,10 +21,14 @@ export function resolveAppPath(relative: string, root = APP_ROOT): string | null
   return absolute;
 }
 
+// Empties the app folder rather than deleting it: on Windows the folder itself stays locked
+// (EBUSY) for a moment after the terminal that sat in it is killed.
 export async function resetApp(): Promise<void> {
-  await rm(APP_ROOT, { recursive: true, force: true });
-  await rm(GOOD_ROOT, { recursive: true, force: true });
   await mkdir(APP_ROOT, { recursive: true });
+  for (const entry of await readdir(APP_ROOT)) {
+    await rm(path.join(APP_ROOT, entry), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+  await rm(GOOD_ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
 
 export async function writeAppFile(relative: string, content: string): Promise<boolean> {
@@ -152,4 +157,60 @@ export async function prepareClone(source: string, port: number): Promise<string
     await symlink(modules, path.join(target, "node_modules"), "junction");
   }
   return target;
+}
+
+// Minimal ZIP writer (stored, no compression): enough for a source tree without a dependency.
+export function zipEntries(entries: { path: string; data: Buffer }[]): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.path, "utf8");
+    const crc = crc32(entry.data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(0, 10);
+    local.writeUInt16LE(0x21, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(entry.data.length, 18);
+    local.writeUInt32LE(entry.data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(0, 12);
+    central.writeUInt16LE(0x21, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(entry.data.length, 20);
+    central.writeUInt32LE(entry.data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    locals.push(local, name, entry.data);
+    centrals.push(central, name);
+    offset += local.length + name.length + entry.data.length;
+  }
+  const directory = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, directory, end]);
+}
+
+export async function zipApp(): Promise<Buffer> {
+  const entries: { path: string; data: Buffer }[] = [];
+  for (const file of await listFiles()) {
+    const absolute = resolveAppPath(file.path);
+    if (absolute) entries.push({ path: file.path, data: await readFile(absolute) });
+  }
+  return zipEntries(entries);
 }
