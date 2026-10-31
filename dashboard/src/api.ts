@@ -202,6 +202,8 @@ export const api = {
       request<{ path: string; content: string }>("GET", `/api/app/good-file?path=${encodeURIComponent(path)}`),
     request: (method: HttpMethod, path: string, body?: string) =>
       request<AppResponse>("POST", "/api/app/request", { method, path, body: body || undefined }),
+    incidentDiff: (path: string) =>
+      request<{ path: string; before: string; after: string }>("GET", `/api/app/incident-diff?path=${encodeURIComponent(path)}`),
     downloadUrl: "/api/app/download",
   },
 };

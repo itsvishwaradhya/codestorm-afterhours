@@ -88,6 +88,9 @@ export class AppHealer {
   private watcher: FSWatcher | null = null;
   private treeTimer: NodeJS.Timeout | null = null;
   incident: AppIncident | null = null;
+  // The changed files as NightShift found them when the incident opened, so the diff still
+  // shows the bug after a rollback has made the live code good again.
+  private incidentFiles = new Map<string, { before: string; after: string }>();
 
   constructor(private readonly deps: AppHealerDeps) {
     this.terminal = new AppTerminal((data) => deps.publish("pty-data", data));
@@ -170,9 +173,14 @@ export class AppHealer {
     this.watcher = null;
   }
 
+  incidentDiff(file: string): { before: string; after: string } | null {
+    return this.incidentFiles.get(file) ?? null;
+  }
+
   async uploaded(): Promise<void> {
     this.proxy.clear();
     this.incident = null;
+    this.incidentFiles.clear();
     this.lastInjection = null;
     this.savedGood = false;
     this.terminal.restart();
@@ -377,6 +385,13 @@ export class AppHealer {
   private async heal(trigger: WindowStats): Promise<void> {
     const now = new Date();
     const changed = (await hasGoodSnapshot()) ? await changedFiles() : [];
+    this.incidentFiles.clear();
+    for (const file of changed) {
+      this.incidentFiles.set(file, { before: (await readAppFile(file, GOOD_ROOT)) ?? "", after: (await readAppFile(file)) ?? "" });
+    }
+    if (this.lastInjection && !this.incidentFiles.has(this.lastInjection.file)) {
+      this.incidentFiles.set(this.lastInjection.file, { before: this.lastInjection.before, after: this.lastInjection.after });
+    }
     this.incident = {
       id: randomUUID(),
       phase: "detected",

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import Editor, { DiffEditor, loader, type OnMount } from "@monaco-editor/react";
+import Editor, { DiffEditor, loader, type DiffOnMount, type OnMount } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
@@ -112,20 +112,75 @@ export default function CodeEditor({ path, content, readOnly = true, onChange, o
   );
 }
 
-// Side-by-side, read-only comparison (last known good on the left, current file on the right).
-export function CodeDiff({ path, original, modified }: { path: string; original: string; modified: string }) {
+export interface DiffStats {
+  changes: number;
+  added: number;
+  removed: number;
+}
+
+// Read-only comparison: left is the older version, right the newer one. `id` keeps the models
+// of two diffs of the same file (for example "the bug" and "now") apart.
+export function CodeDiff({
+  id,
+  path,
+  original,
+  modified,
+  inline = false,
+  onStats,
+}: {
+  id: string;
+  path: string;
+  original: string;
+  modified: string;
+  inline?: boolean;
+  onStats?: (stats: DiffStats) => void;
+}) {
+  const stats = useRef(onStats);
+  useEffect(() => {
+    stats.current = onStats;
+  });
+
+  const onMount: DiffOnMount = (editor) => {
+    // A reused model keeps its old text; make sure both sides show what was passed in.
+    const models = editor.getModel();
+    if (models && models.original.getValue() !== original) models.original.setValue(original);
+    if (models && models.modified.getValue() !== modified) models.modified.setValue(modified);
+    const report = () => {
+      // null until the worker has finished the first comparison.
+      const changes = editor.getLineChanges();
+      if (!changes) return;
+      const span = (start: number, end: number) => (end >= start && end > 0 ? end - start + 1 : 0);
+      stats.current?.({
+        changes: changes.length,
+        added: changes.reduce((sum, change) => sum + span(change.modifiedStartLineNumber, change.modifiedEndLineNumber), 0),
+        removed: changes.reduce((sum, change) => sum + span(change.originalStartLineNumber, change.originalEndLineNumber), 0),
+      });
+    };
+    editor.onDidUpdateDiff(report);
+    report();
+  };
+
   return (
     <DiffEditor
       original={original}
       modified={modified}
-      originalModelPath={`good/${path}`}
-      modifiedModelPath={`diff/${path}`}
+      originalModelPath={`${id}/before/${path}`}
+      modifiedModelPath={`${id}/after/${path}`}
+      keepCurrentOriginalModel
+      keepCurrentModifiedModel
       language={languageOf(path)}
       theme="vs-dark"
+      onMount={onMount}
       options={{
         readOnly: true,
         originalEditable: false,
-        renderSideBySide: true,
+        renderSideBySide: !inline,
+        // Without this Monaco silently switches to inline under 900 px, which is most of the time here.
+        useInlineViewWhenSpaceIsLimited: false,
+        hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 5, revealLineCount: 10 },
+        ignoreTrimWhitespace: false,
+        renderIndicators: true,
+        renderOverviewRuler: true,
         fontSize: 13,
         fontFamily: "JetBrains Mono, Consolas, ui-monospace, monospace",
         scrollBeyondLastLine: false,

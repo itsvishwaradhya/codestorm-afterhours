@@ -62,7 +62,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { percent } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { languageOf } from "./code-editor";
+import { languageOf, type DiffStats } from "./code-editor";
 import { RequestPanel, type AppRequest } from "./request-panel";
 import { StatusDot } from "./status";
 import { TAG_COLOR, TONE_COLOR, line, type TermLine, type Tone } from "./workspace";
@@ -119,8 +119,11 @@ function startDrag(event: ReactPointerEvent, cursor: string, onMove: (dx: number
   window.addEventListener("pointerup", up);
 }
 
+// Diff tabs: "diff:<file>" compares last good with the file now; "bug:<file>" shows the broken
+// version NightShift caught, which stays visible after a rollback.
 const DIFF_PREFIX = "diff:";
-const diffTarget = (path: string) => path.slice(DIFF_PREFIX.length);
+const BUG_PREFIX = "bug:";
+const diffTarget = (path: string) => path.slice(path.indexOf(":") + 1);
 
 const MAX_OUTPUT = 600;
 const MAX_UPLOAD_BYTES = 200 * 1024;
@@ -141,8 +144,9 @@ interface Tab {
   path: string;
   content: string;
   saved: string;
-  // Set on diff tabs (path "diff:<file>"): the last known good version shown on the left.
+  // Set on diff tabs: the older version shown on the left.
   original?: string;
+  diffKind?: "now" | "bug";
 }
 
 interface Node {
@@ -287,6 +291,10 @@ export function AppWorkspace() {
   const tree = useMemo(() => buildTree(entries ?? []), [entries]);
   const activeTab = tabs.find((tab) => tab.path === active) ?? null;
   const activeDiff = activeTab && activeTab.original !== undefined ? diffTarget(activeTab.path) : null;
+  const [diffInline, setDiffInline] = useState(false);
+  const [diffStats, setDiffStats] = useState<DiffStats | null>(null);
+  // Each diff tab reports its own numbers once Monaco has compared it.
+  useEffect(() => setDiffStats(null), [active, diffInline]);
 
   const say = useCallback((text: string, tone: Tone = "info") => {
     setOutput((current) => [...current, line("nightshift", text, tone)].slice(-MAX_OUTPUT));
@@ -313,6 +321,7 @@ export function AppWorkspace() {
   // Pick up changes made on disk by NightShift (injection, rollback) in tabs with no unsaved edits.
   const reloadClean = useCallback(async () => {
     for (const tab of tabsRef.current) {
+      if (tab.diffKind === "bug") continue;
       if (tab.original !== undefined) {
         const file = diffTarget(tab.path);
         const [good, current] = await Promise.all([api.app.goodFile(file).catch(() => null), api.app.file(file).catch(() => null)]);
@@ -376,7 +385,7 @@ export function AppWorkspace() {
     const plain = tabs.filter((tab) => tab.original === undefined);
     writeStored(SESSION_KEY, {
       open: plain.map((tab) => tab.path),
-      active: active && !active.startsWith(DIFF_PREFIX) ? active : null,
+      active: plain.some((tab) => tab.path === active) ? active : null,
       drafts: Object.fromEntries(plain.filter((tab) => tab.content !== tab.saved).map((tab) => [tab.path, tab.content])),
     } satisfies Session);
   }, [tabs, active]);
@@ -474,11 +483,23 @@ export function AppWorkspace() {
       flash(`No last known good copy of ${file} yet. NightShift saves one after the app serves cleanly for 10 s.`);
       return;
     }
-    const path = DIFF_PREFIX + file;
     const content = current?.content ?? "";
-    const tab: Tab = { path, content, saved: content, original: good.content };
-    setTabs((list) => (list.some((item) => item.path === path) ? list.map((item) => (item.path === path ? tab : item)) : [...list, tab]));
-    setActive(path);
+    showDiff({ path: DIFF_PREFIX + file, content, saved: content, original: good.content, diffKind: "now" });
+  };
+
+  // The bug NightShift caught (last good ↔ broken at detection). Falls back to "now" before an
+  // incident has opened, when the live file still is the broken one.
+  const openBugDiff = async (file: string) => {
+    setMenu(null);
+    const caught = await api.app.incidentDiff(file).catch(() => null);
+    if (!caught) return openDiff(file);
+    showDiff({ path: BUG_PREFIX + file, content: caught.after, saved: caught.after, original: caught.before, diffKind: "bug" });
+  };
+
+  const showDiff = (tab: Tab) => {
+    setTabs((list) => (list.some((item) => item.path === tab.path) ? list.map((item) => (item.path === tab.path ? tab : item)) : [...list, tab]));
+    setActive(tab.path);
+    setDiffStats(null);
   };
 
   const send = async (next?: AppRequest) => {
@@ -991,14 +1012,24 @@ export function AppWorkspace() {
                         setMenu(null);
                         setTabMenu({ x: event.clientX, y: event.clientY, path: tab.path });
                       }}
-                      title={isDiff ? `${diffTarget(tab.path)}: last known good ↔ current` : tab.path}
+                      title={
+                        !isDiff
+                          ? tab.path
+                          : tab.diffKind === "bug"
+                            ? `${diffTarget(tab.path)}: last known good ↔ broken version NightShift caught`
+                            : `${diffTarget(tab.path)}: last known good ↔ current`
+                      }
                       className={cn(
                         "group flex shrink-0 cursor-pointer items-center gap-1.5 border-r border-[#2b2b2b] pl-3 pr-1.5 text-[13px]",
                         isActive ? "border-t border-t-[#0078d4] bg-[#1f1f1f] text-white" : "bg-[#181818] text-[#9d9d9d] hover:text-[#cccccc]",
                       )}
                     >
-                      {isDiff ? <GitCompare className="size-3.5 text-sky-300" /> : <FileIcon path={tab.path} className="size-3.5" />}
-                      {isDiff ? `${nameOf(diffTarget(tab.path))} (good ↔ now)` : nameOf(tab.path)}
+                      {isDiff ? (
+                        <GitCompare className={cn("size-3.5", tab.diffKind === "bug" ? "text-rose-400" : "text-sky-300")} />
+                      ) : (
+                        <FileIcon path={tab.path} className="size-3.5" />
+                      )}
+                      {isDiff ? `${nameOf(diffTarget(tab.path))} (${tab.diffKind === "bug" ? "the bug" : "good ↔ now"})` : nameOf(tab.path)}
                       <button
                         onClick={(event) => closeTab(tab.path, event)}
                         className="grid size-5 place-items-center rounded hover:bg-[#3c3c3c]"
@@ -1018,13 +1049,52 @@ export function AppWorkspace() {
                 })}
               </div>
               {activeTab && activeDiff !== null && (
-                <div className="flex h-6 shrink-0 items-center gap-2 px-3 text-xs text-[#a9a9a9]">
-                  <GitCompare className="size-3 text-sky-300" />
-                  <span>{activeDiff}</span>
-                  <span className="text-zinc-500">last known good (left) ↔ current file (right)</span>
-                  <button onClick={() => void openFile(activeDiff)} className="ml-auto rounded px-1.5 hover:bg-[#3c3c3c]">
-                    Open file
-                  </button>
+                <div className="flex h-8 shrink-0 items-center gap-3 border-b border-[#2b2b2b] px-3 text-xs text-[#a9a9a9]">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <GitCompare className={cn("size-3.5 shrink-0", activeTab.diffKind === "bug" ? "text-rose-400" : "text-sky-300")} />
+                    <span className="truncate font-mono text-[#cccccc]">{activeDiff}</span>
+                  </span>
+                  <span className="hidden shrink-0 items-center gap-1.5 md:flex">
+                    <span className="rounded bg-emerald-500/15 px-1.5 text-emerald-300">last known good</span>
+                    <span className="text-zinc-500">→</span>
+                    <span className={cn("rounded px-1.5", activeTab.diffKind === "bug" ? "bg-rose-500/15 text-rose-300" : "bg-sky-500/15 text-sky-300")}>
+                      {activeTab.diffKind === "bug" ? "broken (caught by NightShift)" : "current file"}
+                    </span>
+                  </span>
+                  {activeTab.original !== activeTab.content && !diffStats && (
+                    <span className="flex shrink-0 items-center gap-1 text-zinc-500">
+                      <Loader2 className="size-3 animate-spin" />
+                      comparing…
+                    </span>
+                  )}
+                  {activeTab.original !== activeTab.content && diffStats && (
+                    <span className="shrink-0 font-mono">
+                      <span className="text-emerald-400">+{diffStats.added}</span> <span className="text-rose-400">−{diffStats.removed}</span>
+                      <span className="text-zinc-500">
+                        {" "}
+                        · {diffStats.changes} change{diffStats.changes === 1 ? "" : "s"}
+                      </span>
+                    </span>
+                  )}
+                  <span className="ml-auto flex shrink-0 items-center gap-1">
+                    <span className="flex overflow-hidden rounded border border-[#3c3c3c]">
+                      {[
+                        { label: "Side by side", on: !diffInline, set: false },
+                        { label: "Inline", on: diffInline, set: true },
+                      ].map((mode) => (
+                        <button
+                          key={mode.label}
+                          onClick={() => setDiffInline(mode.set)}
+                          className={cn("px-2 py-0.5", mode.on ? "bg-[#0078d4] text-white" : "hover:bg-[#3c3c3c]")}
+                        >
+                          {mode.label}
+                        </button>
+                      ))}
+                    </span>
+                    <button onClick={() => void openFile(activeDiff)} className="rounded px-1.5 py-0.5 hover:bg-[#3c3c3c]">
+                      Open file
+                    </button>
+                  </span>
                 </div>
               )}
               {activeTab && activeDiff === null && (
@@ -1037,7 +1107,7 @@ export function AppWorkspace() {
                     </span>
                   ))}
                   {incident?.injection?.file === activeTab.path && live && (
-                    <button onClick={() => void openDiff(activeTab.path)} title="Compare with the last known good version">
+                    <button onClick={() => void openBugDiff(activeTab.path)} title="Compare with the last known good version">
                       <Badge variant="destructive" className="ml-2 h-4 cursor-pointer text-[10px]">
                         bug injected here · view diff
                       </Badge>
@@ -1046,9 +1116,41 @@ export function AppWorkspace() {
                 </div>
               )}
               <div className="min-h-0 flex-1">
-                {activeTab && activeTab.original !== undefined ? (
+                {activeTab && activeTab.original !== undefined && activeTab.original === activeTab.content ? (
+                  <div className="grid h-full place-items-center p-6 text-center text-sm text-[#8b8b8b]">
+                    <div className="max-w-sm space-y-2">
+                      <CheckCircle2 className="mx-auto size-6 text-emerald-400" />
+                      <p className="text-[#cccccc]">No differences</p>
+                      <p>
+                        {diffTarget(activeTab.path)} matches the last known good version
+                        {activeTab.diffKind === "now" &&
+                        incident?.outcome?.includes("Roll back") &&
+                        incident.changedFiles.includes(diffTarget(activeTab.path))
+                          ? ", because NightShift rolled it back"
+                          : ""}
+                        .
+                      </p>
+                      {activeTab.diffKind === "now" && incident?.changedFiles.includes(diffTarget(activeTab.path)) && (
+                        <button
+                          onClick={() => void openBugDiff(diffTarget(activeTab.path))}
+                          className="rounded border border-[#3c3c3c] px-2 py-1 text-xs text-[#cccccc] hover:bg-[#3c3c3c]"
+                        >
+                          Show the bug NightShift caught
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : activeTab && activeTab.original !== undefined ? (
                   <Suspense fallback={<Skeleton className="m-4 h-40" />}>
-                    <CodeDiff path={diffTarget(activeTab.path)} original={activeTab.original} modified={activeTab.content} />
+                    <CodeDiff
+                      key={`${activeTab.path}:${diffInline}`}
+                      id={activeTab.path}
+                      path={diffTarget(activeTab.path)}
+                      original={activeTab.original}
+                      modified={activeTab.content}
+                      inline={diffInline}
+                      onStats={setDiffStats}
+                    />
                   </Suspense>
                 ) : activeTab ? (
                   <Suspense fallback={<Skeleton className="m-4 h-40" />}>
@@ -1360,7 +1462,7 @@ export function AppWorkspace() {
                   {incident.injection.injectedBy} changed <span className="font-mono">{incident.injection.file}</span>
                   {incident.injection.route && <> (GET <span className="font-mono">{incident.injection.route}</span>)</>}: {incident.injection.description}
                   <button
-                    onClick={() => incident.injection && void openDiff(incident.injection.file)}
+                    onClick={() => incident.injection && void openBugDiff(incident.injection.file)}
                     className="mt-1.5 flex items-center gap-1 rounded border border-rose-400/40 px-1.5 py-0.5 text-[11px] text-rose-100 hover:bg-rose-500/20"
                   >
                     <GitCompare className="size-3" />
@@ -1377,7 +1479,7 @@ export function AppWorkspace() {
                     {incident.changedFiles.map((file, index) => (
                       <span key={file}>
                         {index > 0 && ", "}
-                        <button onClick={() => void openDiff(file)} title="Compare with the last known good version" className="font-mono underline decoration-dotted hover:text-foreground">
+                        <button onClick={() => void openBugDiff(file)} title="Show the change NightShift caught" className="font-mono underline decoration-dotted hover:text-foreground">
                           {file}
                         </button>
                       </span>
