@@ -531,7 +531,10 @@ export class AppHealer {
     if (chosen.id === "rollback") await restoreGood();
     if (chosen.id === "patch" && patch) await writeAppFile(patch.file, patch.after);
     await this.restartApp();
-    await waitForPort(APP_PORT, 20_000);
+    // The tick loop is paused while healing, so update the status here or the app shows as
+    // stopped for the whole watch.
+    this.runner.running = await waitForPort(APP_PORT, 20_000);
+    this.emit();
     const liveAt = Date.now();
     await this.phase("watching", `fix live, watching production for ${WATCH_MS / 1000}s`, "app.watching");
 
