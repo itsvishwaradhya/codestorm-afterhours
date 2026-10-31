@@ -29,6 +29,7 @@ import {
   FolderOpen,
   FolderPlus,
   FolderUp,
+  FolderX,
   Loader2,
   Pencil,
   Play,
@@ -354,6 +355,27 @@ export function AppWorkspace() {
     if (selected?.path === node.path) setSelected(null);
   };
 
+  // VS Code's "Close Folder": stops the app and empties the workspace back to "Open Folder".
+  const closeFolder = async () => {
+    setMenu(null);
+    if (tabs.some((tab) => tab.content !== tab.saved) && !window.confirm("Discard unsaved changes in open editors?")) return;
+    if (!window.confirm(`Close folder '${projectName}'? This stops the app and removes its files from the workspace.`)) return;
+    try {
+      epochRef.current += 1;
+      await api.app.reset();
+      showTree(await api.app.uploaded());
+      setTabs([]);
+      setActive(null);
+      setSelected(null);
+      setPending(null);
+      setExpanded(new Set());
+      say("closed folder", "muted");
+      flash("Folder closed");
+    } catch (error) {
+      flash(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const toggle = (path: string) =>
     setExpanded((current) => {
       const next = new Set(current);
@@ -573,7 +595,14 @@ export function AppWorkspace() {
           {sidebarOpen && (
             <aside className="flex w-60 shrink-0 flex-col border-r border-[#2b2b2b] bg-[#181818]">
               <div className="flex h-9 items-center justify-between px-4 text-[11px] uppercase tracking-wide text-[#bbbbbb]">Explorer</div>
-              <div className="group flex h-6 items-center justify-between pl-1 pr-1 text-[11px] font-bold uppercase text-[#cccccc]">
+              <div
+                className="group flex h-6 items-center justify-between pl-1 pr-1 text-[11px] font-bold uppercase text-[#cccccc]"
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setSelected(null);
+                  setMenu({ x: event.clientX, y: event.clientY, node: null });
+                }}
+              >
                 <span className="flex items-center gap-0.5">
                   <ChevronDown className="size-3.5" />
                   {projectName}
@@ -585,6 +614,7 @@ export function AppWorkspace() {
                     { title: "Refresh Explorer", icon: RefreshCw, run: () => void refreshTree() },
                     { title: "Collapse Folders in Explorer", icon: ChevronsDownUp, run: () => setExpanded(new Set()) },
                     { title: "Open Folder (upload)", icon: FolderUp, run: () => folderRef.current?.click() },
+                    ...(empty ? [] : [{ title: "Close Folder", icon: FolderX, run: () => void closeFolder() }]),
                   ].map((action) => (
                     <button key={action.title} title={action.title} onClick={action.run} className="grid size-5 place-items-center rounded hover:bg-[#3c3c3c]">
                       <action.icon className="size-3.5" />
@@ -940,6 +970,7 @@ export function AppWorkspace() {
               show: Boolean(menu.node),
             },
             { label: "Delete", icon: Trash2, run: () => menu.node && void remove(menu.node), show: Boolean(menu.node) },
+            { label: "Close Folder", icon: FolderX, run: () => void closeFolder(), show: !menu.node && !empty, divider: true },
           ]
             .filter((item) => item.show)
             .map((item) => (
@@ -949,7 +980,10 @@ export function AppWorkspace() {
                   setMenu(null);
                   item.run();
                 }}
-                className="flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-[#04395e]"
+                className={cn(
+                  "flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-[#04395e]",
+                  "divider" in item && item.divider && "mt-1 border-t border-[#454545] pt-1.5",
+                )}
               >
                 <item.icon className="size-3.5 text-zinc-400" />
                 {item.label}
