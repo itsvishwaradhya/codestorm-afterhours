@@ -8,6 +8,7 @@ export interface Sample {
   at: number;
   status: number;
   ms: number;
+  path?: string;
 }
 
 export interface WindowStats {
@@ -16,20 +17,39 @@ export interface WindowStats {
   errorRate: number;
   p95Ms: number;
   reachable: boolean;
+  // Routes failing at least half of their requests. One broken route out of many barely moves
+  // the overall error rate, but its users still get errors on every call.
+  failingRoutes: string[];
 }
+
+const ROUTE_MIN_REQUESTS = 2;
+const ROUTE_FAIL_RATE = 0.5;
 
 export function summarize(samples: Sample[]): WindowStats {
   const errors = samples.filter((sample) => sample.status >= 500).length;
   const latencies = samples.map((sample) => sample.ms).sort((a, b) => a - b);
   const p95 = latencies.length ? latencies[Math.min(latencies.length - 1, Math.floor(latencies.length * 0.95))] : 0;
+  const byRoute = new Map<string, { requests: number; errors: number }>();
+  for (const sample of samples) {
+    if (!sample.path) continue;
+    const route = byRoute.get(sample.path) ?? { requests: 0, errors: 0 };
+    route.requests += 1;
+    if (sample.status >= 500) route.errors += 1;
+    byRoute.set(sample.path, route);
+  }
   return {
     requests: samples.length,
     errors,
     errorRate: samples.length ? errors / samples.length : 0,
     p95Ms: Math.round(p95),
     reachable: samples.length === 0 || samples.some((sample) => sample.status !== 502),
+    failingRoutes: [...byRoute.entries()]
+      .filter(([, route]) => route.requests >= ROUTE_MIN_REQUESTS && route.errors / route.requests >= ROUTE_FAIL_RATE)
+      .map(([path]) => path),
   };
 }
+
+const pathOf = (url: string | undefined) => (url ?? "/").split("?")[0] || "/";
 
 // Sits in front of the user's app and measures every request, so the app needs no instrumentation.
 export class MeasuringProxy {
@@ -41,7 +61,7 @@ export class MeasuringProxy {
     this.server = http.createServer((req, res) => {
       const started = performance.now();
       const done = (status: number) => {
-        this.samples.push({ at: Date.now(), status, ms: performance.now() - started });
+        this.samples.push({ at: Date.now(), status, ms: performance.now() - started, path: pathOf(req.url) });
         if (this.samples.length > 2000) this.samples.splice(0, 1000);
       };
       if (req.method === "GET" && req.url) {

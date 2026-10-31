@@ -190,7 +190,8 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
     "/api/app/incident-diff",
     wrap(async (req, res) => {
       const parsed = workspaceFileSchema.safeParse(req.query);
-      const diff = parsed.success ? ctx.app.incidentDiff(parsed.data.path) : null;
+      const which = req.query.which === "fix" ? "fix" : "bug";
+      const diff = parsed.success ? ctx.app.incidentDiff(parsed.data.path, which) : null;
       if (!parsed.success || !diff) {
         res.status(404).json({ error: "this file was not part of the incident" });
         return;

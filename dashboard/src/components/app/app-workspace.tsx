@@ -41,6 +41,7 @@ import {
   Search,
   Send,
   ShieldAlert,
+  Sparkles,
   Square,
   Trash2,
   X,
@@ -52,9 +53,7 @@ import {
   type AppLog,
   type AppResponse,
   type AppState,
-  type BugKind,
   type HttpMethod,
-  type InjectOptions,
   type WorkspaceFile,
 } from "@/api";
 import { Badge } from "@/components/ui/badge";
@@ -120,10 +119,17 @@ function startDrag(event: ReactPointerEvent, cursor: string, onMove: (dx: number
 }
 
 // Diff tabs: "diff:<file>" compares last good with the file now; "bug:<file>" shows the broken
-// version NightShift caught, which stays visible after a rollback.
+// version NightShift caught, which stays visible after a rollback; "fix:<file>" shows the AI fix.
 const DIFF_PREFIX = "diff:";
 const BUG_PREFIX = "bug:";
+const FIX_PREFIX = "fix:";
 const diffTarget = (path: string) => path.slice(path.indexOf(":") + 1);
+
+const DIFF_TONE = {
+  now: { icon: "text-sky-300", tab: "good ↔ now", left: "last known good", leftChip: "bg-emerald-500/15 text-emerald-300", right: "current file", chip: "bg-sky-500/15 text-sky-300" },
+  bug: { icon: "text-rose-400", tab: "the bug", left: "last known good", leftChip: "bg-emerald-500/15 text-emerald-300", right: "broken (caught by NightShift)", chip: "bg-rose-500/15 text-rose-300" },
+  fix: { icon: "text-emerald-400", tab: "the AI fix", left: "broken", leftChip: "bg-rose-500/15 text-rose-300", right: "fixed by AI", chip: "bg-emerald-500/15 text-emerald-300" },
+} as const;
 
 const MAX_OUTPUT = 600;
 const MAX_UPLOAD_BYTES = 200 * 1024;
@@ -146,7 +152,7 @@ interface Tab {
   saved: string;
   // Set on diff tabs: the older version shown on the left.
   original?: string;
-  diffKind?: "now" | "bug";
+  diffKind?: "now" | "bug" | "fix";
 }
 
 interface Node {
@@ -277,9 +283,6 @@ export function AppWorkspace() {
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [uploading, setUploading] = useState<string | null>(null);
   const [injecting, setInjecting] = useState(false);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [injectOptions, setInjectOptions] = useState<InjectOptions | null>(null);
-  const [choice, setChoice] = useState<{ route: string; kind: BugKind | "" }>({ route: "", kind: "" });
   const [notice, setNotice] = useState<string | null>(null);
   const folderRef = useRef<HTMLInputElement>(null);
   const outputRef = useRef<HTMLDivElement>(null);
@@ -321,7 +324,7 @@ export function AppWorkspace() {
   // Pick up changes made on disk by NightShift (injection, rollback) in tabs with no unsaved edits.
   const reloadClean = useCallback(async () => {
     for (const tab of tabsRef.current) {
-      if (tab.diffKind === "bug") continue;
+      if (tab.diffKind === "bug" || tab.diffKind === "fix") continue;
       if (tab.original !== undefined) {
         const file = diffTarget(tab.path);
         const [good, current] = await Promise.all([api.app.goodFile(file).catch(() => null), api.app.file(file).catch(() => null)]);
@@ -496,6 +499,14 @@ export function AppWorkspace() {
     showDiff({ path: BUG_PREFIX + file, content: caught.after, saved: caught.after, original: caught.before, diffKind: "bug" });
   };
 
+  // The AI fix as written: broken file ↔ patched file.
+  const openFixDiff = async (file: string) => {
+    setMenu(null);
+    const fix = await api.app.incidentDiff(file, "fix").catch(() => null);
+    if (!fix) return flash(`No AI fix recorded for ${file}.`);
+    showDiff({ path: FIX_PREFIX + file, content: fix.after, saved: fix.after, original: fix.before, diffKind: "fix" });
+  };
+
   const showDiff = (tab: Tab) => {
     setTabs((list) => (list.some((item) => item.path === tab.path) ? list.map((item) => (item.path === tab.path ? tab : item)) : [...list, tab]));
     setActive(tab.path);
@@ -654,25 +665,13 @@ export function AppWorkspace() {
     }
   };
 
-  // The picker re-reads the routes each time, since the code may have changed.
-  const openPicker = async () => {
-    setPickerOpen(true);
-    try {
-      const options = await api.app.injectOptions();
-      setInjectOptions(options);
-      setChoice((current) => (current.route && !options.targets.some((target) => target.route === current.route) ? { ...current, route: "" } : current));
-    } catch (error) {
-      flash(`Could not load routes: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
-
+  // Every click lets the healer pick a random route and kind of bug, and the AI writes it.
   const inject = async () => {
-    setPickerOpen(false);
     setInjecting(true);
     setPanel("output");
     setPanelOpen(true);
     try {
-      const result = await api.app.inject({ route: choice.route || undefined, kind: choice.kind || undefined });
+      const result = await api.app.inject();
       if (result) {
         await reloadClean();
         void openFile(result.file);
@@ -1025,11 +1024,11 @@ export function AppWorkspace() {
                       )}
                     >
                       {isDiff ? (
-                        <GitCompare className={cn("size-3.5", tab.diffKind === "bug" ? "text-rose-400" : "text-sky-300")} />
+                        <GitCompare className={cn("size-3.5", DIFF_TONE[tab.diffKind ?? "now"].icon)} />
                       ) : (
                         <FileIcon path={tab.path} className="size-3.5" />
                       )}
-                      {isDiff ? `${nameOf(diffTarget(tab.path))} (${tab.diffKind === "bug" ? "the bug" : "good ↔ now"})` : nameOf(tab.path)}
+                      {isDiff ? `${nameOf(diffTarget(tab.path))} (${DIFF_TONE[tab.diffKind ?? "now"].tab})` : nameOf(tab.path)}
                       <button
                         onClick={(event) => closeTab(tab.path, event)}
                         className="grid size-5 place-items-center rounded hover:bg-[#3c3c3c]"
@@ -1051,14 +1050,16 @@ export function AppWorkspace() {
               {activeTab && activeDiff !== null && (
                 <div className="flex h-8 shrink-0 items-center gap-3 border-b border-[#2b2b2b] px-3 text-xs text-[#a9a9a9]">
                   <span className="flex min-w-0 items-center gap-1.5">
-                    <GitCompare className={cn("size-3.5 shrink-0", activeTab.diffKind === "bug" ? "text-rose-400" : "text-sky-300")} />
+                    <GitCompare className={cn("size-3.5 shrink-0", DIFF_TONE[activeTab.diffKind ?? "now"].icon)} />
                     <span className="truncate font-mono text-[#cccccc]">{activeDiff}</span>
                   </span>
                   <span className="hidden shrink-0 items-center gap-1.5 md:flex">
-                    <span className="rounded bg-emerald-500/15 px-1.5 text-emerald-300">last known good</span>
+                    <span className={cn("rounded px-1.5", DIFF_TONE[activeTab.diffKind ?? "now"].leftChip)}>
+                      {DIFF_TONE[activeTab.diffKind ?? "now"].left}
+                    </span>
                     <span className="text-zinc-500">→</span>
-                    <span className={cn("rounded px-1.5", activeTab.diffKind === "bug" ? "bg-rose-500/15 text-rose-300" : "bg-sky-500/15 text-sky-300")}>
-                      {activeTab.diffKind === "bug" ? "broken (caught by NightShift)" : "current file"}
+                    <span className={cn("rounded px-1.5", DIFF_TONE[activeTab.diffKind ?? "now"].chip)}>
+                      {DIFF_TONE[activeTab.diffKind ?? "now"].right}
                     </span>
                   </span>
                   {activeTab.original !== activeTab.content && !diffStats && (
@@ -1340,68 +1341,14 @@ export function AppWorkspace() {
             <Button
               size="sm"
               className="flex-1"
-              variant={pickerOpen ? "secondary" : "default"}
               disabled={!state?.running || injecting || Boolean(live)}
-              onClick={() => (pickerOpen ? setPickerOpen(false) : void openPicker())}
+              title="The AI breaks a random route with a random kind of bug"
+              onClick={() => void inject()}
             >
               {injecting ? <Loader2 className="animate-spin" /> : <Bug />}
               {injecting ? "Injecting…" : "AI: inject bug"}
             </Button>
           </div>
-          {pickerOpen && state?.running && !live && (
-            <div className="mt-3 space-y-2 rounded-lg border bg-background/40 p-2.5 text-xs">
-              <label className="block space-y-1">
-                <span className="text-muted-foreground">Route to break</span>
-                <select
-                  value={choice.route}
-                  onChange={(event) => setChoice((current) => ({ ...current, route: event.target.value }))}
-                  className="h-8 w-full rounded-md border bg-background px-2 font-mono text-xs"
-                >
-                  <option value="">Busiest file, first route</option>
-                  {(injectOptions?.targets ?? []).map((target) => (
-                    <option key={`${target.file}:${target.route}`} value={target.route}>
-                      GET {target.route} · {target.file}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="block space-y-1">
-                <span className="text-muted-foreground">Kind of bug</span>
-                <select
-                  value={choice.kind}
-                  onChange={(event) => setChoice((current) => ({ ...current, kind: event.target.value as BugKind | "" }))}
-                  className="h-8 w-full rounded-md border bg-background px-2 text-xs"
-                >
-                  <option value="">Let the AI decide</option>
-                  {(injectOptions?.kinds ?? []).map((kind) => (
-                    <option key={kind.id} value={kind.id}>
-                      {kind.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <p className="text-muted-foreground">
-                {(() => {
-                  const target = injectOptions?.targets.find((item) => item.route === choice.route);
-                  const kind = injectOptions?.kinds.find((item) => item.id === choice.kind);
-                  const where = target ? `GET ${target.route} in ${target.file}` : "the first route of the busiest file";
-                  return kind ? `Breaks ${where}: ${kind.effect}.` : `The AI writes a realistic bug for ${where}.`;
-                })()}
-              </p>
-              {injectOptions && injectOptions.targets.length === 0 && (
-                <p className="text-amber-500">No GET routes with a fixed path found, so there is nothing NightShift's traffic would notice.</p>
-              )}
-              <div className="flex gap-2">
-                <Button size="sm" variant="ghost" className="flex-1" onClick={() => setPickerOpen(false)}>
-                  Cancel
-                </Button>
-                <Button size="sm" className="flex-1" disabled={injectOptions?.targets.length === 0} onClick={() => void inject()}>
-                  <Bug />
-                  Inject
-                </Button>
-              </div>
-            </div>
-          )}
           <p className="mt-2 text-[11px] text-muted-foreground">
             Traffic runs through NightShift's proxy on :{state?.proxyPort ?? 4500}, so your app needs no changes.
           </p>
@@ -1470,8 +1417,27 @@ export function AppWorkspace() {
                   </button>
                 </p>
               )}
+              {incident.patch && (
+                <p className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-xs text-emerald-200">
+                  <Sparkles className="mr-1 inline size-3.5" />
+                  {incident.patch.patchedBy} wrote a fix for <span className="font-mono">{incident.patch.file}</span>: {incident.patch.description}
+                  <button
+                    onClick={() => incident.patch && void openFixDiff(incident.patch.file)}
+                    className="mt-1.5 flex items-center gap-1 rounded border border-emerald-400/40 px-1.5 py-0.5 text-[11px] text-emerald-100 hover:bg-emerald-500/20"
+                  >
+                    <GitCompare className="size-3" />
+                    View fix
+                  </button>
+                </p>
+              )}
               <p className="text-xs text-muted-foreground">
                 Trigger: {incident.trigger.reachable ? `${percent(incident.trigger.errorRate)} errors` : "app unreachable"}
+                {(incident.trigger.failingRoutes?.length ?? 0) > 0 && (
+                  <>
+                    {" "}
+                    on <span className="font-mono">{incident.trigger.failingRoutes!.join(", ")}</span>
+                  </>
+                )}
                 {incident.changedFiles.length > 0 && (
                   <>
                     {" "}

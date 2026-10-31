@@ -37,6 +37,7 @@ export interface AppWindow {
   errorRate: number;
   p95Ms: number;
   reachable: boolean;
+  failingRoutes?: string[];
 }
 
 export interface AppIncident {
@@ -48,13 +49,14 @@ export interface AppIncident {
   changedFiles: string[];
   injection: AppInjection | null;
   candidates: {
-    id: "restart" | "rollback";
+    id: "restart" | "patch" | "rollback";
     label: string;
     verdict: "promote" | "reject";
     requests: number;
     errorRate: number;
     p95Ms: number;
   }[];
+  patch: { file: string; description: string; patchedBy: string } | null;
   outcome: string | null;
   receipt: string | null;
 }
@@ -202,8 +204,11 @@ export const api = {
       request<{ path: string; content: string }>("GET", `/api/app/good-file?path=${encodeURIComponent(path)}`),
     request: (method: HttpMethod, path: string, body?: string) =>
       request<AppResponse>("POST", "/api/app/request", { method, path, body: body || undefined }),
-    incidentDiff: (path: string) =>
-      request<{ path: string; before: string; after: string }>("GET", `/api/app/incident-diff?path=${encodeURIComponent(path)}`),
+    incidentDiff: (path: string, which: "bug" | "fix" = "bug") =>
+      request<{ path: string; before: string; after: string }>(
+        "GET",
+        `/api/app/incident-diff?path=${encodeURIComponent(path)}&which=${which}`,
+      ),
     downloadUrl: "/api/app/download",
   },
 };

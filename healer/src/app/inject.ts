@@ -4,7 +4,6 @@ import path from "node:path";
 import type { LlmProvider } from "../receipt/chain.js";
 import { APP_ROOT, listFiles, readAppFile } from "./files.js";
 
-const ROUTE_CALL = /(?:app|router)\.get\(/g;
 const HANDLER = /(?:app|router)\.get\(\s*(['"`])([^'"`]+)\1\s*,[^{]*?(?:=>|function\s*\w*\s*\([^)]*\))\s*\{/g;
 const CODE_FILE = /\.(c|m)?js$/;
 
@@ -50,6 +49,13 @@ export const BUG_CATALOG: Record<BugKind, { label: string; effect: string; promp
   },
 };
 
+// Random picks leave out "intermittent": on a busy app it can stay under the alert line, and a
+// random demo should always produce an incident.
+export const RANDOM_KINDS: BugKind[] = ["null_deref", "bad_parse", "error_response", "process_crash"];
+
+export const pick = <T>(list: readonly T[], random: () => number = Math.random): T | undefined =>
+  list.length ? list[Math.floor(random() * list.length) % list.length] : undefined;
+
 export interface InjectOptions {
   route?: string;
   kind?: BugKind;
@@ -85,19 +91,9 @@ export async function listTargets(): Promise<InjectTarget[]> {
   return targets;
 }
 
-export async function pickTarget(): Promise<string | null> {
-  let best: { path: string; routes: number } | null = null;
-  for (const file of await listFiles()) {
-    if (!CODE_FILE.test(file.path)) continue;
-    const content = (await readAppFile(file.path)) ?? "";
-    const routes = content.match(ROUTE_CALL)?.length ?? 0;
-    if (routes > 0 && (!best || routes > best.routes)) best = { path: file.path, routes };
-  }
-  return best?.path ?? null;
-}
 
 // `node --check` next to the original, so the package's module type applies.
-async function syntaxOk(file: string, content: string): Promise<boolean> {
+export async function syntaxOk(file: string, content: string): Promise<boolean> {
   const absolute = path.join(APP_ROOT, file);
   const probe = absolute.replace(CODE_FILE, (ext) => `.nscheck${ext}`);
   await writeFile(probe, content);
@@ -164,19 +160,18 @@ export async function injectBug(
   log: (line: string) => void,
   breaksApp: BugCheck = async () => true,
   options: InjectOptions = {},
+  random: () => number = Math.random,
 ): Promise<Injection | null> {
   const targets = await listTargets();
-  const busiest = await pickTarget();
-  const target = options.route
-    ? targets.find((candidate) => candidate.route === options.route)
-    : (targets.find((candidate) => candidate.file === busiest) ?? targets[0]);
+  const target = options.route ? targets.find((candidate) => candidate.route === options.route) : pick(targets, random);
   if (!target) {
     log(options.route ? `no GET ${options.route} handler found to break` : "no Express GET routes found to break");
     return null;
   }
   const { file, route } = target;
-  const kind = options.kind ?? null;
-  log(`target: GET ${route} in ${file}; bug: ${kind ? BUG_CATALOG[kind].label.toLowerCase() : "AI's choice"}`);
+  // Unless asked for one, every click picks a fresh route and kind, so no two demos are alike.
+  const kind = options.kind ?? pick(RANDOM_KINDS, random)!;
+  log(`target: GET ${route} in ${file}; bug: ${BUG_CATALOG[kind].label.toLowerCase()}${options.kind ? "" : " (picked at random)"}`);
   const before = (await readAppFile(file)) ?? "";
 
   for (const provider of providers) {
@@ -184,7 +179,7 @@ export async function injectBug(
     const timer = setTimeout(() => controller.abort(), 25_000);
     try {
       log(`asking ${provider.id} to inject a bug into GET ${route} (${file})…`);
-      const reply = parseReply(await provider.complete(systemPrompt(route, options.kind), `File ${file}:\n\n${before}`, controller.signal));
+      const reply = parseReply(await provider.complete(systemPrompt(route, kind), `File ${file}:\n\n${before}`, controller.signal));
       if (!reply || reply.content.trim() === before.trim()) {
         log(`${provider.id} reply was not a usable change`);
         continue;
@@ -206,7 +201,7 @@ export async function injectBug(
     }
   }
 
-  const scripted = scriptedBug(before, route, options.kind);
+  const scripted = scriptedBug(before, route, kind);
   if (!scripted || !(await syntaxOk(file, scripted.content))) {
     log("could not inject a bug into this app");
     return null;
