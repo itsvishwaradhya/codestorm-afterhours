@@ -1,7 +1,8 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveAppPath } from "../src/app/files.js";
-import { scriptedBug } from "../src/app/inject.js";
+import { GOOD_ROOT, resolveAppPath, zipEntries } from "../src/app/files.js";
+import { BUG_KINDS, RANDOM_KINDS, pick, scriptedBug, targetsIn } from "../src/app/inject.js";
+import { changedLines, patchPrompt } from "../src/app/patch.js";
 import { discoverRoutes, summarize } from "../src/app/proxy.js";
 import { isServerCommand } from "../src/app/terminal.js";
 
@@ -20,17 +21,41 @@ describe("resolveAppPath", () => {
 });
 
 describe("scriptedBug", () => {
-  it("throws at the top of the first GET handler", () => {
-    const source = 'app.get("/items", (req, res) => {\n  res.json([]);\n});\n';
+  const source = 'app.get("/items", (req, res) => {\n  res.json([]);\n});\napp.get("/users", (req, res) => {\n  res.json([]);\n});\n';
+
+  it("puts the default bug at the top of the first GET handler", () => {
     const bug = scriptedBug(source);
     expect(bug?.description).toContain("/items");
-    expect(bug?.content).toContain('throw new Error("lookup failed")');
-    expect(bug?.content.indexOf("throw")).toBeLessThan(bug!.content.indexOf("res.json"));
+    expect(bug?.content).toContain("owner.length");
+    expect(bug?.content.indexOf("owner.length")).toBeLessThan(bug!.content.indexOf("res.json"));
+  });
+
+  it("targets the chosen route with the chosen kind", () => {
+    const bug = scriptedBug(source, "/users", "error_response");
+    expect(bug?.description).toContain("GET /users");
+    const users = bug!.content.indexOf('"/users"');
+    expect(bug!.content.indexOf("status(500)")).toBeGreaterThan(users);
+    expect(bug!.content.slice(0, users)).not.toContain("status(500)");
+    expect(scriptedBug(source, "/missing")).toBeNull();
+  });
+
+  it("produces valid JavaScript for every kind", () => {
+    for (const kind of BUG_KINDS) {
+      const bug = scriptedBug(source, "/items", kind);
+      expect(() => new Function("app", "process", bug!.content)).not.toThrow();
+    }
   });
 
   it("handles function handlers and routers", () => {
     expect(scriptedBug("router.get('/a', async function (req, res) { res.end(); });")).not.toBeNull();
     expect(scriptedBug("const x = 1;")).toBeNull();
+  });
+});
+
+describe("targetsIn", () => {
+  it("lists static GET routes and skips parameterised ones", () => {
+    const source = 'app.get("/a", (q, r) => { r.end(); });\nrouter.get("/b/:id", (q, r) => { r.end(); });\napp.post("/c", (q, r) => { r.end(); });';
+    expect(targetsIn("server.js", source)).toEqual([{ file: "server.js", route: "/a" }]);
   });
 });
 
@@ -61,5 +86,75 @@ describe("app helpers", () => {
     expect(isServerCommand("node server.js")).toBe(true);
     expect(isServerCommand("npm install")).toBe(false);
     expect(isServerCommand("ls")).toBe(false);
+  });
+});
+
+describe("zipEntries", () => {
+  it("writes one local header per file and a matching central directory", () => {
+    const zip = zipEntries([
+      { path: "server.js", data: Buffer.from("console.log(1)") },
+      { path: "src/app.js", data: Buffer.from("") },
+    ]);
+    expect(zip.readUInt32LE(0)).toBe(0x04034b50);
+    const end = zip.length - 22;
+    expect(zip.readUInt32LE(end)).toBe(0x06054b50);
+    expect(zip.readUInt16LE(end + 10)).toBe(2);
+    const directoryAt = zip.readUInt32LE(end + 16);
+    expect(zip.readUInt32LE(directoryAt)).toBe(0x02014b50);
+    expect(zip.includes(Buffer.from("src/app.js"))).toBe(true);
+  });
+});
+
+describe("good copy paths", () => {
+  it("stay inside the last known good folder", () => {
+    expect(resolveAppPath("server.js", GOOD_ROOT)).toBe(path.join(GOOD_ROOT, "server.js"));
+    expect(resolveAppPath("../app/server.js", GOOD_ROOT)).toBeNull();
+  });
+});
+
+describe("random injection", () => {
+  it("picks from the list using the random source", () => {
+    expect(pick(["a", "b", "c"], () => 0)).toBe("a");
+    expect(pick(["a", "b", "c"], () => 0.99)).toBe("c");
+    expect(pick([], () => 0.5)).toBeUndefined();
+  });
+
+  it("only picks kinds that always produce an incident", () => {
+    expect(RANDOM_KINDS).not.toContain("intermittent");
+    for (const kind of RANDOM_KINDS) expect(BUG_KINDS).toContain(kind);
+  });
+});
+
+describe("failing routes", () => {
+  it("flags a route that fails most requests even when the overall rate is low", () => {
+    const ok = Array.from({ length: 12 }, (_, i) => ({ at: i, status: 200, ms: 1, path: `/r${i % 6}` }));
+    const stats = summarize([...ok, { at: 20, status: 500, ms: 1, path: "/books" }, { at: 21, status: 500, ms: 1, path: "/books" }]);
+    expect(stats.errorRate).toBeLessThan(0.15);
+    expect(stats.failingRoutes).toEqual(["/books"]);
+  });
+
+  it("needs more than one request before flagging a route", () => {
+    expect(summarize([{ at: 0, status: 500, ms: 1, path: "/once" }]).failingRoutes).toEqual([]);
+  });
+});
+
+describe("AI fix prompt", () => {
+  it("shows only the lines that changed", () => {
+    const diff = changedLines("a\nb\nc\nd", "a\nb\nX\nd");
+    expect(diff).toBe("@@ line 3 @@\n- c\n+ X");
+  });
+
+  it("includes the errors, failing routes and the change since last good", () => {
+    const prompt = patchPrompt({
+      file: "src/books.js",
+      broken: "a\nbroken\nc",
+      good: "a\nb\nc",
+      errors: ["[error] GET /books: Cannot read properties of undefined"],
+      failingRoutes: ["/books"],
+    });
+    expect(prompt).toContain("src/books.js");
+    expect(prompt).toContain("Failing routes: /books");
+    expect(prompt).toContain("Cannot read properties of undefined");
+    expect(prompt).toContain("+ broken");
   });
 });

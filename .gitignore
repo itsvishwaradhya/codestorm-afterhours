@@ -3,3 +3,6 @@ dist/
 .env
 # uploaded apps for the Workspace
 workspaces/
+
+# Demo recordings
+*.mp4

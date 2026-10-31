@@ -37,6 +37,7 @@ export interface AppWindow {
   errorRate: number;
   p95Ms: number;
   reachable: boolean;
+  failingRoutes?: string[];
 }
 
 export interface AppIncident {
@@ -46,15 +47,16 @@ export interface AppIncident {
   closedAt: string | null;
   trigger: AppWindow;
   changedFiles: string[];
-  injection: { file: string; description: string; injectedBy: string } | null;
+  injection: AppInjection | null;
   candidates: {
-    id: "restart" | "rollback";
+    id: "restart" | "patch" | "rollback";
     label: string;
     verdict: "promote" | "reject";
     requests: number;
     errorRate: number;
     p95Ms: number;
   }[];
+  patch: { file: string; description: string; patchedBy: string } | null;
   outcome: string | null;
   receipt: string | null;
 }
@@ -68,6 +70,30 @@ export interface AppState {
   health: AppWindow;
   incident: AppIncident | null;
   hasSnapshot: boolean;
+}
+
+export type BugKind = "null_deref" | "bad_parse" | "error_response" | "intermittent" | "process_crash";
+
+export interface AppInjection {
+  file: string;
+  route: string;
+  kind: BugKind | null;
+  description: string;
+  injectedBy: string;
+}
+
+export interface InjectOptions {
+  targets: { file: string; route: string }[];
+  kinds: { id: BugKind; label: string; effect: string }[];
+}
+
+export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
+export interface AppResponse {
+  status: number;
+  ms: number;
+  contentType: string | null;
+  body: string;
 }
 
 export interface CapStatus {
@@ -171,7 +197,18 @@ export const api = {
     remove: (path: string) => request<WorkspaceFile[]>("POST", "/api/app/delete", { path }),
     rename: (from: string, to: string) => request<WorkspaceFile[]>("POST", "/api/app/rename", { from, to }),
     stop: () => request("POST", "/api/app/stop"),
-    inject: () => request<{ file: string; description: string; injectedBy: string } | null>("POST", "/api/app/inject"),
+    injectOptions: () => request<InjectOptions>("GET", "/api/app/inject-options"),
+    inject: (choice: { route?: string; kind?: BugKind } = {}) => request<AppInjection | null>("POST", "/api/app/inject", choice),
     state: () => request<AppState>("GET", "/api/app/state"),
+    goodFile: (path: string) =>
+      request<{ path: string; content: string }>("GET", `/api/app/good-file?path=${encodeURIComponent(path)}`),
+    request: (method: HttpMethod, path: string, body?: string) =>
+      request<AppResponse>("POST", "/api/app/request", { method, path, body: body || undefined }),
+    incidentDiff: (path: string, which: "bug" | "fix" = "bug") =>
+      request<{ path: string; before: string; after: string }>(
+        "GET",
+        `/api/app/incident-diff?path=${encodeURIComponent(path)}&which=${which}`,
+      ),
+    downloadUrl: "/api/app/download",
   },
 };

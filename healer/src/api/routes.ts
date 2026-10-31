@@ -19,11 +19,15 @@ import { healTiming } from "../report/timing.js";
 import * as repo from "../store/repository.js";
 import type { LogLine } from "../supervisor/supervisor.js";
 import type { AppHealer } from "../app/healer.js";
-import { deleteAppPath, listTree, makeAppDir, readAppFile, renameAppPath, resetApp, writeAppFile } from "../app/files.js";
+import { GOOD_ROOT, deleteAppPath, listTree, makeAppDir, readAppFile, renameAppPath, resetApp, writeAppFile, zipApp } from "../app/files.js";
+import { BUG_CATALOG, BUG_KINDS, listTargets } from "../app/inject.js";
+import { PROXY_PORT } from "../app/proxy.js";
 import {
   appExecSchema,
   appFileSchema,
+  appInjectSchema,
   appRenameSchema,
+  appRequestSchema,
   approvalSchema,
   captureSchema,
   chaosSchema,
@@ -167,6 +171,75 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
     }),
   );
 
+  // The last known good copy NightShift rolls back to, for the bug-vs-heal diff.
+  app.get(
+    "/api/app/good-file",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.query);
+      const content = parsed.success ? await readAppFile(parsed.data.path, GOOD_ROOT) : null;
+      if (!parsed.success || content === null) {
+        res.status(404).json({ error: "no good copy of this file" });
+        return;
+      }
+      res.json({ path: parsed.data.path, content });
+    }),
+  );
+
+  // The bug as NightShift caught it: last known good against the broken file at detection time.
+  app.get(
+    "/api/app/incident-diff",
+    wrap(async (req, res) => {
+      const parsed = workspaceFileSchema.safeParse(req.query);
+      const which = req.query.which === "fix" ? "fix" : "bug";
+      const diff = parsed.success ? ctx.app.incidentDiff(parsed.data.path, which) : null;
+      if (!parsed.success || !diff) {
+        res.status(404).json({ error: "this file was not part of the incident" });
+        return;
+      }
+      res.json({ path: parsed.data.path, ...diff });
+    }),
+  );
+
+  app.get(
+    "/api/app/download",
+    wrap(async (_req, res) => {
+      res.setHeader("content-type", "application/zip");
+      res.setHeader("content-disposition", 'attachment; filename="my-app.zip"');
+      res.send(await zipApp());
+    }),
+  );
+
+  // Sends one request through NightShift's proxy, so it counts in the app's metrics like real traffic.
+  app.post(
+    "/api/app/request",
+    wrap(async (req, res) => {
+      const parsed = appRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "path must start with /" });
+        return;
+      }
+      const { method, path: route, body } = parsed.data;
+      const started = performance.now();
+      try {
+        const response = await fetch(`http://127.0.0.1:${PROXY_PORT}${route}`, {
+          method,
+          headers: body ? { "content-type": "application/json" } : undefined,
+          body: method === "GET" || method === "DELETE" ? undefined : body,
+          signal: AbortSignal.timeout(10_000),
+        });
+        const text = await response.text();
+        res.json({
+          status: response.status,
+          ms: Math.round(performance.now() - started),
+          contentType: response.headers.get("content-type"),
+          body: text.length > 50_000 ? `${text.slice(0, 50_000)}\n… (truncated)` : text,
+        });
+      } catch (error) {
+        res.json({ status: 0, ms: Math.round(performance.now() - started), contentType: null, body: error instanceof Error ? error.message : String(error) });
+      }
+    }),
+  );
+
   app.post(
     "/api/app/exec",
     wrap(async (req, res) => {
@@ -212,11 +285,31 @@ export function registerRoutes(app: Express, ctx: ApiContext): void {
     }),
   );
 
+  // What the inject picker offers: GET routes NightShift's traffic reaches, and the bug catalog.
+  app.get(
+    "/api/app/inject-options",
+    wrap(async (_req, res) => {
+      res.json({
+        targets: await listTargets(),
+        kinds: BUG_KINDS.map((id) => ({ id, label: BUG_CATALOG[id].label, effect: BUG_CATALOG[id].effect })),
+      });
+    }),
+  );
+
   app.post(
     "/api/app/inject",
-    wrap(async (_req, res) => {
-      const injection = await ctx.app.inject();
-      res.json(injection ? { file: injection.file, description: injection.description, injectedBy: injection.injectedBy } : null);
+    wrap(async (req, res) => {
+      const parsed = appInjectSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({ error: "unknown route or bug kind" });
+        return;
+      }
+      const injection = await ctx.app.inject(parsed.data);
+      res.json(
+        injection
+          ? { file: injection.file, route: injection.route, kind: injection.kind, description: injection.description, injectedBy: injection.injectedBy }
+          : null,
+      );
     }),
   );
 
